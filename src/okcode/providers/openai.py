@@ -19,6 +19,7 @@ from okcode.models import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    TokenUsage,
     ToolCall,
 )
 from okcode.tools.models import ToolDefinition
@@ -62,12 +63,14 @@ class OpenAIProvider:
                 request["extra_body"] = {"thinking": {"type": "enabled"}}
             if tools:
                 request["tools"] = [_serialize_tool_definition(tool) for tool in tools]
-                request["parallel_tool_calls"] = False
+            request["stream_options"] = {"include_usage": True}
 
             stream = await self._client.chat.completions.create(**request)
+            usage = TokenUsage.unavailable()
             async with stream:
                 async for chunk in stream:
                     started = True
+                    usage = _usage_from_object(getattr(chunk, "usage", None), usage)
                     for choice in getattr(chunk, "choices", ()) or ():
                         if getattr(choice, "index", 0) != 0:
                             continue
@@ -97,9 +100,10 @@ class OpenAIProvider:
                 )
             answer = "".join(answer_parts)
             if tool_calls:
-                call = _build_tool_call(tool_calls[min(tool_calls)])
+                calls = tuple(_build_tool_call(tool_calls[index]) for index in sorted(tool_calls))
                 yield StreamCompleted(
-                    ChatMessage(role=Role.ASSISTANT, content=answer, tool_call=call)
+                    ChatMessage(role=Role.ASSISTANT, content=answer, tool_calls=calls),
+                    usage=usage,
                 )
                 return
             if not answer.strip():
@@ -107,7 +111,7 @@ class OpenAIProvider:
                     ProviderErrorKind.STREAM,
                     "模型未返回可显示的正式回答。",
                 )
-            yield StreamCompleted(ChatMessage(role=Role.ASSISTANT, content=answer))
+            yield StreamCompleted(ChatMessage(role=Role.ASSISTANT, content=answer), usage=usage)
         except asyncio.CancelledError:
             raise
         except ProviderError:
@@ -131,26 +135,28 @@ class OpenAIProvider:
                 result.append({"role": "user", "content": message.content})
             elif message.role is Role.ASSISTANT:
                 payload: dict[str, Any] = {"role": "assistant", "content": message.content or None}
-                if message.tool_call is not None:
+                if message.tool_calls:
                     payload["tool_calls"] = [
                         {
-                            "id": message.tool_call.id,
+                            "id": call.id,
                             "type": "function",
                             "function": {
-                                "name": message.tool_call.name,
-                                "arguments": message.tool_call.arguments_json,
+                                "name": call.name,
+                                "arguments": call.arguments_json,
                             },
                         }
+                        for call in message.tool_calls
                     ]
                 result.append(payload)
-            elif message.role is Role.TOOL and message.tool_result is not None:
-                result.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": message.tool_result.tool_call_id,
-                        "content": message.tool_result.to_json(),
-                    }
-                )
+            elif message.role is Role.TOOL and message.tool_results:
+                for tool_result in message.tool_results:
+                    result.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_result.tool_call_id,
+                            "content": tool_result.to_json(),
+                        }
+                    )
             else:
                 raise ValueError("无法序列化无效的 OpenAI 会话消息。")
         return result
@@ -208,6 +214,22 @@ def _build_tool_call(parts: _OpenAIToolCallParts) -> ToolCall:
     if not isinstance(arguments, dict):
         raise ProviderError(ProviderErrorKind.STREAM, "工具调用参数必须是 JSON 对象。")
     return ToolCall(id=parts.call_id, name=parts.name, arguments_json=arguments_json)
+
+
+def _usage_from_object(value: object | None, fallback: TokenUsage) -> TokenUsage:
+    if value is None:
+        return fallback
+    input_tokens = getattr(value, "prompt_tokens", None)
+    output_tokens = getattr(value, "completion_tokens", None)
+    total_tokens = getattr(value, "total_tokens", None)
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return fallback
+    return TokenUsage(
+        input_tokens=input_tokens if isinstance(input_tokens, int) else None,
+        output_tokens=output_tokens if isinstance(output_tokens, int) else None,
+        total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+        available=True,
+    )
 
 
 def _extension_value(value: object, name: str) -> object | None:

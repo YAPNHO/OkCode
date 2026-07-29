@@ -26,6 +26,13 @@ class ToolErrorCode(StrEnum):
     INTERNAL_ERROR = "internal_error"
 
 
+class ToolSafety(StrEnum):
+    """工具调度时使用的安全类别。"""
+
+    READ_ONLY = "read_only"
+    SIDE_EFFECT = "side_effect"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     """供模型声明和运行时校验共用的工具元信息。"""
@@ -34,6 +41,7 @@ class ToolDefinition:
     description: str
     input_schema: Mapping[str, JSONValue]
     timeout_seconds: float
+    safety: ToolSafety = ToolSafety.SIDE_EFFECT
 
 
 @dataclass(frozen=True, slots=True)

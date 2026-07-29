@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from okcode.tools.defaults import build_default_registry
-from okcode.tools.models import JSONValue, ToolDefinition, ToolOutput
+from okcode.tools.models import JSONValue, ToolDefinition, ToolOutput, ToolSafety
 from okcode.tools.registry import ToolRegistry
 from okcode.tools.workspace import Workspace
 
@@ -65,3 +65,19 @@ def test_default_registry_contains_exactly_six_tools(tmp_path: Path) -> None:
         definition.description and definition.timeout_seconds > 0 for definition in definitions
     )
     assert all(definition.input_schema["type"] == "object" for definition in definitions)
+    assert {definition.name: definition.safety for definition in definitions} == {
+        "edit_file": ToolSafety.SIDE_EFFECT,
+        "find_files": ToolSafety.READ_ONLY,
+        "read_file": ToolSafety.READ_ONLY,
+        "run_command": ToolSafety.SIDE_EFFECT,
+        "search_code": ToolSafety.READ_ONLY,
+        "write_file": ToolSafety.SIDE_EFFECT,
+    }
+    read_only_names = [
+        definition.name for definition in registry.definitions_by_safety(ToolSafety.READ_ONLY)
+    ]
+    assert read_only_names == [
+        "find_files",
+        "read_file",
+        "search_code",
+    ]

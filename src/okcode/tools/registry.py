@@ -1,7 +1,7 @@
 """工具注册与发现。"""
 
 from okcode.tools.base import Tool
-from okcode.tools.models import ToolDefinition
+from okcode.tools.models import ToolDefinition, ToolSafety
 
 
 class ToolRegistry:
@@ -25,3 +25,12 @@ class ToolRegistry:
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(self._tools[name].definition for name in sorted(self._tools))
+
+    def definitions_by_safety(self, safety: ToolSafety) -> tuple[ToolDefinition, ...]:
+        """按安全类别返回模型可见工具声明。"""
+
+        return tuple(
+            self._tools[name].definition
+            for name in sorted(self._tools)
+            if self._tools[name].definition.safety is safety
+        )

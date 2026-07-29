@@ -9,7 +9,14 @@ import subprocess
 from collections.abc import Mapping
 
 from okcode.tools.files import _object_schema
-from okcode.tools.models import JSONValue, ToolDefinition, ToolErrorCode, ToolFailure, ToolOutput
+from okcode.tools.models import (
+    JSONValue,
+    ToolDefinition,
+    ToolErrorCode,
+    ToolFailure,
+    ToolOutput,
+    ToolSafety,
+)
 from okcode.tools.workspace import Workspace
 
 _STREAM_LIMIT = 6_000
@@ -27,6 +34,7 @@ class RunCommandTool:
                 {"command": {"type": "string", "minLength": 1}}, ["command"]
             ),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.SIDE_EFFECT,
         )
 
     @property

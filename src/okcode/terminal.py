@@ -11,9 +11,13 @@ from rich.rule import Rule
 
 from okcode.errors import ProviderError
 from okcode.models import (
+    AgentProgress,
+    AgentStopped,
     ProviderConfig,
     TextDelta,
     ThinkingDelta,
+    TokenUsageReported,
+    ToolCallRequested,
     ToolExecutionFinished,
     ToolExecutionStarted,
     TurnEvent,
@@ -63,10 +67,18 @@ class TerminalUI:
 
         if isinstance(event, (ThinkingDelta, TextDelta)):
             self.render_delta(event)
+        elif isinstance(event, AgentProgress):
+            self._render_progress(event)
+        elif isinstance(event, ToolCallRequested):
+            self._render_tool_requested(event)
         elif isinstance(event, ToolExecutionStarted):
             self._render_tool_started(event)
         elif isinstance(event, ToolExecutionFinished):
             self._render_tool_finished(event)
+        elif isinstance(event, TokenUsageReported):
+            self._render_token_usage(event)
+        elif isinstance(event, AgentStopped):
+            self._render_agent_stopped(event)
 
     def finish_turn(self) -> None:
         thinking_closed = self._close_thinking_section()
@@ -132,6 +144,19 @@ class TerminalUI:
             self._seen_sections.add("answer")
         self._console.print(event.delta, end="", markup=False, highlight=False, soft_wrap=True)
 
+    def _render_progress(self, event: AgentProgress) -> None:
+        self._finish_line()
+        self._console.print(f"进度：{event.message}", style="dim")
+        self._turn_open = True
+
+    def _render_tool_requested(self, event: ToolCallRequested) -> None:
+        self._finish_line()
+        self._console.print(
+            f"工具：模型请求 {event.call.name}（#{event.index + 1}）",
+            style="cyan",
+        )
+        self._turn_open = True
+
     def _render_tool_started(self, event: ToolExecutionStarted) -> None:
         self._finish_line()
         self._console.print(f"工具：正在执行 {event.tool_name}...", style="cyan")
@@ -144,6 +169,28 @@ class TerminalUI:
         if len(summary) > 160:
             summary = summary[:160] + "..."
         self._console.print(f"工具：{result.tool_name} {status}。{summary}")
+        self._turn_open = True
+
+    def _render_token_usage(self, event: TokenUsageReported) -> None:
+        self._finish_line()
+        usage = event.usage
+        if not usage.available:
+            self._console.print(f"Token：第 {event.iteration} 轮用量不可用。", style="dim")
+        else:
+            parts = []
+            if usage.input_tokens is not None:
+                parts.append(f"输入 {usage.input_tokens}")
+            if usage.output_tokens is not None:
+                parts.append(f"输出 {usage.output_tokens}")
+            if usage.total_tokens is not None:
+                parts.append(f"总计 {usage.total_tokens}")
+            summary = f"Token：第 {event.iteration} 轮，" + "，".join(parts) + "。"
+            self._console.print(summary, style="dim")
+        self._turn_open = True
+
+    def _render_agent_stopped(self, event: AgentStopped) -> None:
+        self._finish_line()
+        self._console.print(f"停止：{event.message}", style="yellow")
         self._turn_open = True
 
     def _close_thinking_section(self) -> bool:

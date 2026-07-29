@@ -293,12 +293,12 @@ async def test_anthropic_input_json_fragments_become_one_tool_call() -> None:
     assert isinstance(completed, StreamCompleted)
     assert completed.message.tool_call == ToolCall("tool-1", "read_file", '{"path":"note.txt"}')
     request = client.messages.calls[0]
-    assert request["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    assert request["tool_choice"] == {"type": "auto"}
     assert request["tools"][0]["input_schema"] == _tool().input_schema  # type: ignore[index]
 
 
 @pytest.mark.asyncio
-async def test_anthropic_uses_first_tool_call_and_rejects_invalid_tool_calls() -> None:
+async def test_anthropic_returns_all_tool_calls_and_rejects_invalid_tool_calls() -> None:
     multiple_final = SimpleNamespace(
         stop_reason="tool_use",
         content=[
@@ -330,8 +330,13 @@ async def test_anthropic_uses_first_tool_call_and_rejects_invalid_tool_calls() -
     completed = events[0]
     assert isinstance(completed, StreamCompleted)
     assert completed.message.tool_call == ToolCall("one", "read_file", "{}")
+    assert completed.message.tool_calls == (
+        ToolCall("one", "read_file", "{}"),
+        ToolCall("two", "read_file", "{}"),
+    )
     assert completed.message.provider_state == (
         {"type": "tool_use", "id": "one", "name": "read_file", "input": {}},
+        {"type": "tool_use", "id": "two", "name": "read_file", "input": {}},
     )
 
     with pytest.raises(ProviderError, match="合法 JSON"):

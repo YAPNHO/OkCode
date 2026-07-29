@@ -58,6 +58,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """一次模型请求的 Token 用量。"""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    available: bool = False
+
+    @classmethod
+    def unavailable(cls) -> "TokenUsage":
+        return cls()
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """统一会话消息；私有状态仅由生成它的 Provider 使用。"""
 
@@ -65,15 +79,37 @@ class ChatMessage:
     content: str = ""
     tool_call: ToolCall | None = None
     tool_result: ToolExecutionResult | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_results: tuple[ToolExecutionResult, ...] = ()
     provider_state: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.role is Role.USER and (not self.content or self.tool_call or self.tool_result):
+        tool_calls = self.tool_calls
+        tool_results = self.tool_results
+        if self.tool_call is not None:
+            if tool_calls and tool_calls != (self.tool_call,):
+                raise ValueError("单个工具调用和工具调用集合不一致。")
+            tool_calls = (self.tool_call,)
+            object.__setattr__(self, "tool_calls", tool_calls)
+        elif tool_calls:
+            object.__setattr__(self, "tool_call", tool_calls[0])
+
+        if self.tool_result is not None:
+            if tool_results and tool_results != (self.tool_result,):
+                raise ValueError("单个工具结果和工具结果集合不一致。")
+            tool_results = (self.tool_result,)
+            object.__setattr__(self, "tool_results", tool_results)
+        elif tool_results:
+            object.__setattr__(self, "tool_result", tool_results[0])
+
+        if self.role is Role.USER and (
+            not self.content or tool_calls or tool_results or self.tool_call or self.tool_result
+        ):
             raise ValueError("用户消息必须只包含非空文本。")
         if self.role is Role.ASSISTANT:
-            if self.tool_result or (not self.content and self.tool_call is None):
+            if tool_results or self.tool_result or (not self.content and not tool_calls):
                 raise ValueError("助手消息必须包含文本或工具调用，且不能包含工具结果。")
-        if self.role is Role.TOOL and (self.tool_result is None or self.content or self.tool_call):
+        if self.role is Role.TOOL and (not tool_results or self.content or tool_calls):
             raise ValueError("工具消息必须只包含工具结果。")
 
 
@@ -96,6 +132,47 @@ class StreamCompleted:
     """Provider 确认流完整结束后的最终助手消息。"""
 
     message: ChatMessage
+    usage: TokenUsage = field(default_factory=TokenUsage.unavailable)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProgress:
+    """Agent 运行进度事件。"""
+
+    message: str
+    iteration: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRequested:
+    """模型请求执行工具，供界面观察调度过程。"""
+
+    call: ToolCall
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class TokenUsageReported:
+    """一轮模型请求结束后的 Token 用量事件。"""
+
+    usage: TokenUsage
+    iteration: int
+
+
+class AgentStopReason(StrEnum):
+    """Agent 非成功停止原因。"""
+
+    NO_SAVED_PLAN = "no_saved_plan"
+    ITERATION_LIMIT = "iteration_limit"
+    UNKNOWN_TOOL_LIMIT = "unknown_tool_limit"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentStopped:
+    """Agent 因非异常、非最终文本条件停止。"""
+
+    reason: AgentStopReason
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,4 +191,13 @@ class ToolExecutionFinished:
 
 type VisibleDelta = ThinkingDelta | TextDelta
 type StreamEvent = ThinkingDelta | TextDelta | StreamCompleted
-type TurnEvent = ThinkingDelta | TextDelta | ToolExecutionStarted | ToolExecutionFinished
+type TurnEvent = (
+    ThinkingDelta
+    | TextDelta
+    | AgentProgress
+    | ToolCallRequested
+    | ToolExecutionStarted
+    | ToolExecutionFinished
+    | TokenUsageReported
+    | AgentStopped
+)

@@ -9,11 +9,18 @@ from okcode.tools.models import ToolDefinition
 
 
 class FakeProvider:
-    def __init__(self, events: list[StreamEvent | Exception]) -> None:
-        self.events = events
+    def __init__(
+        self,
+        events: list[StreamEvent | Exception] | list[list[StreamEvent | Exception]],
+    ) -> None:
+        if events and isinstance(events[0], list):
+            self._scripts = [list(script) for script in events]  # type: ignore[list-item]
+        else:
+            self._scripts = [list(events)]  # type: ignore[arg-type]
         self.requests: list[tuple[ChatMessage, ...]] = []
         self.tools: list[tuple[ToolDefinition, ...]] = []
         self.stream_closed = False
+        self.stream_closed_count = 0
         self.closed = False
 
     def stream(
@@ -23,16 +30,18 @@ class FakeProvider:
     ) -> AsyncIterator[StreamEvent]:
         self.requests.append(tuple(messages))
         self.tools.append(tuple(tools))
-        return self._stream()
+        script = self._scripts.pop(0) if self._scripts else []
+        return self._stream(script)
 
-    async def _stream(self) -> AsyncIterator[StreamEvent]:
+    async def _stream(self, script: list[StreamEvent | Exception]) -> AsyncIterator[StreamEvent]:
         try:
-            for event in self.events:
+            for event in script:
                 if isinstance(event, Exception):
                     raise event
                 yield event
         finally:
             self.stream_closed = True
+            self.stream_closed_count += 1
 
     async def aclose(self) -> None:
         self.closed = True

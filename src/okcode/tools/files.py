@@ -7,7 +7,14 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from okcode.tools.models import JSONValue, ToolDefinition, ToolErrorCode, ToolFailure, ToolOutput
+from okcode.tools.models import (
+    JSONValue,
+    ToolDefinition,
+    ToolErrorCode,
+    ToolFailure,
+    ToolOutput,
+    ToolSafety,
+)
 from okcode.tools.workspace import Workspace
 
 _READ_LIMIT = 12_000
@@ -32,6 +39,7 @@ class ReadFileTool:
             description="读取工作区内 UTF-8 文本文件的内容。",
             input_schema=_object_schema({"path": {"type": "string", "minLength": 1}}, ["path"]),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.READ_ONLY,
         )
 
     @property
@@ -76,6 +84,7 @@ class WriteFileTool:
                 ["path", "content"],
             ),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.SIDE_EFFECT,
         )
 
     @property
@@ -119,6 +128,7 @@ class EditFileTool:
                 ["path", "old_text", "new_text"],
             ),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.SIDE_EFFECT,
         )
 
     @property

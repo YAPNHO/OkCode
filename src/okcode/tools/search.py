@@ -5,7 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from okcode.tools.files import _object_schema
-from okcode.tools.models import JSONValue, ToolDefinition, ToolErrorCode, ToolFailure, ToolOutput
+from okcode.tools.models import (
+    JSONValue,
+    ToolDefinition,
+    ToolErrorCode,
+    ToolFailure,
+    ToolOutput,
+    ToolSafety,
+)
 from okcode.tools.workspace import Workspace
 
 _MAX_FILES = 200
@@ -29,6 +36,7 @@ class FindFilesTool:
                 ["pattern"],
             ),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.READ_ONLY,
         )
 
     @property
@@ -84,6 +92,7 @@ class SearchCodeTool:
                 ["query"],
             ),
             timeout_seconds=timeout_seconds,
+            safety=ToolSafety.READ_ONLY,
         )
 
     @property

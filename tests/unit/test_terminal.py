@@ -6,7 +6,19 @@ from io import StringIO
 from rich.console import Console
 
 from okcode.errors import ProviderError, ProviderErrorKind
-from okcode.models import TextDelta, ThinkingDelta, ToolExecutionFinished, ToolExecutionStarted
+from okcode.models import (
+    AgentProgress,
+    AgentStopped,
+    AgentStopReason,
+    TextDelta,
+    ThinkingDelta,
+    TokenUsage,
+    TokenUsageReported,
+    ToolCall,
+    ToolCallRequested,
+    ToolExecutionFinished,
+    ToolExecutionStarted,
+)
 from okcode.terminal import TerminalUI
 from okcode.tools.models import ToolErrorCode, ToolExecutionResult
 
@@ -93,3 +105,20 @@ def test_tool_events_show_short_status_without_full_json() -> None:
     assert "正在执行 read_file" in text
     assert "read_file 失败。文件不存在。" in text
     assert "不应显示的完整 JSON" not in text
+
+
+def test_agent_events_show_progress_usage_and_stop_message() -> None:
+    ui, output = _ui()
+    ui.render_event(AgentProgress("模型迭代 1/12", 1))
+    ui.render_event(ToolCallRequested(ToolCall("call", "read_file", "{}"), 0))
+    ui.render_event(TokenUsageReported(TokenUsage.unavailable(), 1))
+    ui.render_event(
+        AgentStopped(AgentStopReason.NO_SAVED_PLAN, "没有可执行的计划，请先使用 /plan 生成计划。")
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "进度：模型迭代 1/12" in text
+    assert "模型请求 read_file" in text
+    assert "Token：第 1 轮用量不可用。" in text
+    assert "停止：没有可执行的计划" in text

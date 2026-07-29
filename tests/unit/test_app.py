@@ -6,6 +6,7 @@ from okcode.app import OkCodeApp
 from okcode.conversation import ConversationSession
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.models import (
+    AgentProgress,
     ChatMessage,
     ProviderConfig,
     ProviderProtocol,
@@ -45,7 +46,8 @@ def test_successful_turn_and_exit() -> None:
     finally:
         runner.close()
     assert len(provider.requests) == 1
-    assert ui.deltas == [TextDelta("回答")]
+    assert ui.deltas[0] == AgentProgress("模型迭代 1/12", 1)
+    assert TextDelta("回答") in ui.deltas
     assert ui.finished == 1
     assert ui.goodbyes == 1
 

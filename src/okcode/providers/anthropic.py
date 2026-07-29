@@ -19,6 +19,7 @@ from okcode.models import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    TokenUsage,
     ToolCall,
 )
 from okcode.tools.models import ToolDefinition
@@ -67,12 +68,14 @@ class AnthropicProvider:
                 }
             if tools:
                 request["tools"] = [_serialize_tool_definition(tool) for tool in tools]
-                request["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+                request["tool_choice"] = {"type": "auto"}
 
             tool_input_parts: dict[int, list[str]] = {}
+            usage = TokenUsage.unavailable()
             async with self._client.messages.stream(**request) as stream:
                 async for event in stream:
                     started = True
+                    usage = _usage_from_event(event, usage)
                     event_type = getattr(event, "type", "")
                     if event_type == "thinking":
                         thinking = getattr(event, "thinking", "")
@@ -97,6 +100,7 @@ class AnthropicProvider:
                         saw_message_stop = True
 
                 final_message = await stream.get_final_message()
+                usage = _usage_from_event(final_message, usage)
 
             answer = _extract_text(final_message)
             if not saw_message_stop or not getattr(final_message, "stop_reason", None):
@@ -108,20 +112,25 @@ class AnthropicProvider:
             if tool_blocks and getattr(final_message, "stop_reason", None) != "tool_use":
                 raise ProviderError(ProviderErrorKind.STREAM, "工具调用的停止原因不正确。")
             if tool_blocks:
-                tool_index, tool_block = tool_blocks[0]
-                input_parts = tool_input_parts.get(
-                    tool_index,
-                    tool_input_parts.get(_UNKNOWN_TOOL_INDEX, []),
+                calls = tuple(
+                    _build_tool_call(
+                        tool_block,
+                        tool_input_parts.get(
+                            tool_index,
+                            tool_input_parts.get(_UNKNOWN_TOOL_INDEX, []),
+                        ),
+                    )
+                    for tool_index, tool_block in tool_blocks
                 )
-                call = _build_tool_call(tool_block, input_parts)
-                state = _serialize_single_tool_state(final_message.content, tool_index)
+                state = tuple(_serialize_block(block) for block in final_message.content)
                 yield StreamCompleted(
                     ChatMessage(
                         role=Role.ASSISTANT,
                         content=answer,
-                        tool_call=call,
+                        tool_calls=calls,
                         provider_state=state,
-                    )
+                    ),
+                    usage=usage,
                 )
                 return
             if not answer.strip():
@@ -131,7 +140,8 @@ class AnthropicProvider:
                 )
             state = tuple(_serialize_block(block) for block in final_message.content)
             yield StreamCompleted(
-                ChatMessage(role=Role.ASSISTANT, content=answer, provider_state=state)
+                ChatMessage(role=Role.ASSISTANT, content=answer, provider_state=state),
+                usage=usage,
             )
         except asyncio.CancelledError:
             raise
@@ -158,27 +168,29 @@ class AnthropicProvider:
                 content: object = message.content
                 if message.provider_state is not None:
                     content = deepcopy(message.provider_state)
-                elif message.tool_call is not None:
+                elif message.tool_calls:
                     content = [
                         {
                             "type": "tool_use",
-                            "id": message.tool_call.id,
-                            "name": message.tool_call.name,
-                            "input": json.loads(message.tool_call.arguments_json),
+                            "id": call.id,
+                            "name": call.name,
+                            "input": json.loads(call.arguments_json),
                         }
+                        for call in message.tool_calls
                     ]
                 result.append({"role": "assistant", "content": content})
-            elif message.role is Role.TOOL and message.tool_result is not None:
+            elif message.role is Role.TOOL and message.tool_results:
                 result.append(
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "tool_result",
-                                "tool_use_id": message.tool_result.tool_call_id,
-                                "content": message.tool_result.to_json(),
-                                "is_error": not message.tool_result.success,
+                                "tool_use_id": tool_result.tool_call_id,
+                                "content": tool_result.to_json(),
+                                "is_error": not tool_result.success,
                             }
+                            for tool_result in message.tool_results
                         ],
                     }
                 )
@@ -241,14 +253,20 @@ def _serialize_block(block: Any) -> dict[str, object]:
     raise ProviderError(ProviderErrorKind.STREAM, "无法保存模型返回的对话状态。")
 
 
-def _serialize_single_tool_state(
-    content: Any,
-    selected_tool_index: int,
-) -> tuple[dict[str, object], ...]:
-    return tuple(
-        _serialize_block(block)
-        for index, block in enumerate(content)
-        if index == selected_tool_index or getattr(block, "type", None) != "tool_use"
+def _usage_from_event(event: object, fallback: TokenUsage) -> TokenUsage:
+    usage = getattr(event, "usage", None)
+    message = getattr(event, "message", None)
+    if usage is None and message is not None:
+        usage = getattr(message, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    if input_tokens is None and output_tokens is None:
+        return fallback
+    return TokenUsage(
+        input_tokens=input_tokens if isinstance(input_tokens, int) else fallback.input_tokens,
+        output_tokens=output_tokens if isinstance(output_tokens, int) else fallback.output_tokens,
+        total_tokens=None,
+        available=True,
     )
 
 

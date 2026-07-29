@@ -255,7 +255,7 @@ async def test_current_openai_sdk_parses_deepseek_reasoning_extension() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_tool_fragments_become_one_call_and_disable_parallel_calls() -> None:
+async def test_openai_tool_fragments_become_one_call_and_allows_parallel_calls() -> None:
     first_call = SimpleNamespace(
         index=0,
         id="call-1",
@@ -282,12 +282,13 @@ async def test_openai_tool_fragments_become_one_call_and_disable_parallel_calls(
     assert isinstance(completed, StreamCompleted)
     assert completed.message.tool_call == ToolCall("call-1", "read_file", '{"path":"note.txt"}')
     request = client.completions.calls[0]
-    assert request["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in request
+    assert request["stream_options"] == {"include_usage": True}
     assert request["tools"][0]["function"]["parameters"] == _tool().input_schema  # type: ignore[index]
 
 
 @pytest.mark.asyncio
-async def test_openai_uses_first_tool_call_and_rejects_incomplete_tool_calls() -> None:
+async def test_openai_returns_all_tool_calls_and_rejects_incomplete_tool_calls() -> None:
     multiple = FakeStream(
         [
             _chunk(
@@ -328,6 +329,10 @@ async def test_openai_uses_first_tool_call_and_rejects_incomplete_tool_calls() -
     completed = events[0]
     assert isinstance(completed, StreamCompleted)
     assert completed.message.tool_call == ToolCall("one", "read_file", "{}")
+    assert completed.message.tool_calls == (
+        ToolCall("one", "read_file", "{}"),
+        ToolCall("two", "read_file", "{}"),
+    )
 
     with pytest.raises(ProviderError, match="合法 JSON"):
         _ = await _collect(provider, [ChatMessage(Role.USER, "问题")], [_tool()])

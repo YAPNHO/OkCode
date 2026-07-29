@@ -4,9 +4,11 @@ import pytest
 
 from okcode.conversation import ConversationSession
 from okcode.models import (
+    AgentProgress,
     ChatMessage,
     Role,
     StreamCompleted,
+    TextDelta,
     ToolCall,
     ToolExecutionFinished,
     ToolExecutionStarted,
@@ -22,18 +24,32 @@ from tests.fakes import FakeProvider
 async def test_read_file_tool_turn_executes_once_and_commits_result(tmp_path) -> None:
     (tmp_path / "README.md").write_text("受控内容", encoding="utf-8")
     call = ToolCall("call-read", "read_file", '{"path":"README.md"}')
-    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))])
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
+            [
+                TextDelta("内容是受控内容"),
+                StreamCompleted(ChatMessage(Role.ASSISTANT, "内容是受控内容")),
+            ],
+        ]
+    )
     registry = build_default_registry(Workspace(tmp_path))
     session = ConversationSession(provider, registry, ToolExecutor(registry))
 
     events = [event async for event in session.stream_turn("读 README")]
 
-    assert len(provider.requests) == 1
-    assert isinstance(events[0], ToolExecutionStarted)
-    assert isinstance(events[1], ToolExecutionFinished)
-    assert events[1].result.success is True  # type: ignore[union-attr]
-    assert [message.role for message in session.messages] == [Role.USER, Role.ASSISTANT, Role.TOOL]
-    result = session.messages[-1].tool_result
+    assert len(provider.requests) == 2
+    assert isinstance(events[0], AgentProgress)
+    assert any(isinstance(event, ToolExecutionStarted) for event in events)
+    finished = [event for event in events if isinstance(event, ToolExecutionFinished)]
+    assert finished[0].result.success is True
+    assert [message.role for message in session.messages] == [
+        Role.USER,
+        Role.ASSISTANT,
+        Role.TOOL,
+        Role.ASSISTANT,
+    ]
+    result = session.messages[-2].tool_result
     assert result is not None
     assert result.data["content"] == "受控内容"
 
