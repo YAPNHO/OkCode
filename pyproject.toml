@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "okcode"
+version = "0.1.0"
+description = "终端 AI 编程助手的第一阶段：流式多轮对话"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "anthropic>=0.75",
+  "jsonschema>=4.0",
+  "openai>=1.0",
+  "prompt-toolkit>=3.0",
+  "PyYAML>=6.0",
+  "rich>=13.0",
+]
+
+[project.scripts]
+okcode = "okcode.cli:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
