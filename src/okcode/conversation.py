@@ -232,7 +232,7 @@ class ConversationSession:
             results: dict[int, ToolExecutionResult] = {}
             for index, call in batch:
                 yield ToolCallRequested(call, index)
-                outcome = self._executor.prepare(call)
+                outcome = await self._executor.prepare(call)
                 if isinstance(outcome, ToolExecutionResult):
                     results[index] = outcome
                 else:

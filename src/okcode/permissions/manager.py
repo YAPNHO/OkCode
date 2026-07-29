@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from inspect import isawaitable
 
+from okcode.errors import ExitRequested
 from okcode.models import ToolCall
 from okcode.permissions.blacklist import reject_blacklisted_command
 from okcode.permissions.models import (
@@ -26,7 +28,9 @@ from okcode.tools.models import (
 )
 from okcode.tools.workspace import Workspace
 
-PermissionConfirmer = Callable[[PermissionRequest], PermissionConfirmation]
+PermissionConfirmer = Callable[
+    [PermissionRequest], PermissionConfirmation | Awaitable[PermissionConfirmation]
+]
 
 
 class PermissionManager:
@@ -74,6 +78,30 @@ class PermissionManager:
     ) -> PermissionDecision:
         """返回终局权限结论；拒绝路径不会执行工具业务代码。"""
 
+        request_or_decision = self._authorize_without_confirmation(call, tool, arguments)
+        if isinstance(request_or_decision, PermissionDecision):
+            return request_or_decision
+        return self._confirm(request_or_decision)
+
+    async def authorize_async(
+        self,
+        call: ToolCall,
+        tool: ToolDefinition,
+        arguments: Mapping[str, JSONValue],
+    ) -> PermissionDecision:
+        """异步等待默认模式的用户确认，避免阻塞正在运行的事件循环。"""
+
+        request_or_decision = self._authorize_without_confirmation(call, tool, arguments)
+        if isinstance(request_or_decision, PermissionDecision):
+            return request_or_decision
+        return await self._confirm_async(request_or_decision)
+
+    def _authorize_without_confirmation(
+        self,
+        call: ToolCall,
+        tool: ToolDefinition,
+        arguments: Mapping[str, JSONValue],
+    ) -> PermissionRequest | PermissionDecision:
         request_or_decision = self._build_request(call, tool, arguments)
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
@@ -95,7 +123,7 @@ class PermissionManager:
         if self._mode is PermissionMode.ALLOW:
             return PermissionDecision(True, RuleSource.MODE, "放行模式允许未匹配规则的调用。")
 
-        return self._confirm(request)
+        return request
 
     def _build_request(
         self,
@@ -147,10 +175,32 @@ class PermissionManager:
     def _confirm(self, request: PermissionRequest) -> PermissionDecision:
         try:
             confirmation = self._confirmer(request)
+            if isawaitable(confirmation):
+                confirmation = PermissionConfirmation.DENY
         except (EOFError, KeyboardInterrupt):
             confirmation = PermissionConfirmation.DENY
         except Exception:
             confirmation = PermissionConfirmation.DENY
+        return self._decision_from_confirmation(request, confirmation)
+
+    async def _confirm_async(self, request: PermissionRequest) -> PermissionDecision:
+        try:
+            confirmation = self._confirmer(request)
+            if isawaitable(confirmation):
+                confirmation = await confirmation
+        except (EOFError, KeyboardInterrupt):
+            confirmation = PermissionConfirmation.DENY
+        except Exception:
+            confirmation = PermissionConfirmation.DENY
+        return self._decision_from_confirmation(request, confirmation)
+
+    def _decision_from_confirmation(
+        self,
+        request: PermissionRequest,
+        confirmation: PermissionConfirmation,
+    ) -> PermissionDecision:
+        if confirmation is PermissionConfirmation.EXIT:
+            raise ExitRequested
         if confirmation is PermissionConfirmation.ONCE:
             return PermissionDecision(True, RuleSource.USER_CONFIRMATION, "用户允许本次调用。")
         if confirmation is PermissionConfirmation.SESSION:

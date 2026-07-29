@@ -9,6 +9,8 @@ from okcode.app import OkCodeApp
 from okcode.config import load_config
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
+from okcode.mcp import McpClientManager, McpConfigPaths, load_mcp_config
+from okcode.mcp.models import McpDiscoveryWarning
 from okcode.permissions import PermissionManager, PermissionPaths, load_permission_rules
 from okcode.prompt import PromptCachePolicy
 from okcode.providers.factory import create_provider
@@ -30,9 +32,25 @@ def main() -> int:
 
     runner = asyncio.Runner()
     provider = None
+    mcp_manager = None
     try:
         workspace = Workspace(Path.cwd())
         registry = build_default_registry(workspace)
+        mcp_config = load_mcp_config(McpConfigPaths.for_workspace(workspace.root))
+        mcp_manager = McpClientManager(mcp_config.servers)
+        discovery = runner.run(mcp_manager.discover_tools())
+        warnings = list(discovery.warnings)
+        for tool in discovery.tools:
+            try:
+                registry.register(tool)
+            except ValueError:
+                warnings.append(
+                    McpDiscoveryWarning(
+                        tool.server_name,
+                        "工具注册",
+                        "MCP 工具名称与已有工具冲突，已跳过。",
+                    )
+                )
         known_tool_names = {definition.name for definition in registry.definitions()}
         paths = PermissionPaths.for_workspace(workspace.root)
         rule_sets = load_permission_rules(paths, known_tool_names)
@@ -51,6 +69,8 @@ def main() -> int:
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
             permissions=permissions,
         )
+        for warning in warnings:
+            ui.show_mcp_warning(warning)
         app = OkCodeApp(ui, conversation, runner, config.active_provider)
         return app.run()
     except ConfigError as error:
@@ -60,6 +80,11 @@ def main() -> int:
         ui.show_startup_error()
         return 1
     finally:
+        if mcp_manager is not None:
+            try:
+                runner.run(mcp_manager.aclose())
+            except Exception:
+                pass
         if provider is not None:
             try:
                 runner.run(provider.aclose())

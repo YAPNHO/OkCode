@@ -11,6 +11,10 @@ class ConfigError(OkCodeError):
     """本地配置无效。"""
 
 
+class ExitRequested(OkCodeError):
+    """用户在嵌套交互提示中请求退出 REPL。"""
+
+
 class ProviderErrorKind(StrEnum):
     """供应商错误类别。"""
 

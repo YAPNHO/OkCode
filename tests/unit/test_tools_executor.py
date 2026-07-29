@@ -7,7 +7,7 @@ import pytest
 
 from okcode.models import ToolCall
 from okcode.permissions.manager import PermissionManager
-from okcode.permissions.models import PermissionMode
+from okcode.permissions.models import PermissionConfirmation, PermissionMode
 from okcode.permissions.rules import PermissionPaths
 from okcode.tools.executor import ToolExecutor
 from okcode.tools.models import (
@@ -151,3 +151,43 @@ async def test_permission_rejection_happens_before_command_tool_execution(tmp_pa
     assert result.data["permission_source"] == "blacklist"
     assert result.data["executed"] is False
     assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_waits_for_async_permission_confirmation(tmp_path) -> None:
+    tool = CommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    paths = PermissionPaths(
+        user=tmp_path / "user.yaml",
+        project=tmp_path / ".okcode" / "permissions.yaml",
+        project_local=tmp_path / ".okcode" / "permissions.local.yaml",
+    )
+    requested = asyncio.Event()
+    release = asyncio.Event()
+
+    async def confirm(_: object) -> PermissionConfirmation:
+        requested.set()
+        await release.wait()
+        return PermissionConfirmation.ONCE
+
+    permissions = PermissionManager(
+        Workspace(tmp_path),
+        (),
+        paths,
+        {"run_command"},
+        confirmer=confirm,
+    )
+    task = asyncio.create_task(
+        ToolExecutor(registry, permissions=permissions).execute(
+            ToolCall("call", "run_command", '{"command":"git status"}')
+        )
+    )
+
+    await requested.wait()
+    assert task.done() is False
+    release.set()
+
+    result = await task
+    assert result.success is True
+    assert tool.calls == 1

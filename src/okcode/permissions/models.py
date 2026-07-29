@@ -42,6 +42,7 @@ class RuleSource(StrEnum):
 class PermissionConfirmation(StrEnum):
     """默认模式下用户可作出的确认选择。"""
 
+    EXIT = "exit"
     DENY = "deny"
     ONCE = "once"
     SESSION = "session"

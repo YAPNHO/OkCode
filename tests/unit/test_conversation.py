@@ -7,6 +7,8 @@ import pytest
 
 from okcode.conversation import AgentConfig, ConversationSession
 from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.mcp.models import McpCallResult, McpRemoteToolInfo
+from okcode.mcp.tool import McpRemoteTool
 from okcode.models import (
     AgentProgress,
     AgentStopped,
@@ -224,6 +226,55 @@ async def test_failed_tool_result_is_committed_when_final_answer_arrives() -> No
     tool_message = session.messages[-2]
     assert tool_message.tool_result is not None
     assert tool_message.tool_result.error_code is ToolErrorCode.IO_ERROR
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_calls_registered_mcp_tool_and_reinjects_result() -> None:
+    class RemoteCaller:
+        def __init__(self) -> None:
+            self.arguments: list[dict[str, JSONValue]] = []
+
+        async def call_tool(
+            self,
+            _: str,
+            __: str,
+            arguments: dict[str, JSONValue],
+        ) -> McpCallResult:
+            self.arguments.append(arguments)
+            return McpCallResult(("远端结果",), {"structured_content": {"ok": True}})
+
+    caller = RemoteCaller()
+    tool = McpRemoteTool(
+        McpRemoteToolInfo(
+            "remote",
+            "echo",
+            "回显参数。",
+            {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        ),
+        caller,
+    )
+    registry = ToolRegistry()
+    registry.register(tool)
+    call = ToolCall("remote-call", "mcp__remote__echo", '{"text":"hello"}')
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "远端工具已完成。"))],
+        ]
+    )
+    session = _session(provider, registry)
+
+    _ = [event async for event in session.stream_turn("调用远端工具")]
+
+    assert caller.arguments == [{"text": "hello"}]
+    assert provider.requests[1][-1].tool_result is not None
+    assert provider.requests[1][-1].tool_result.content == "远端结果"
+    assert session.messages[-1].content == "远端工具已完成。"
 
 
 @pytest.mark.asyncio

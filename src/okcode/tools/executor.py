@@ -52,12 +52,12 @@ class ToolExecutor:
         self._data_limit = data_limit
 
     async def execute(self, call: ToolCall) -> ToolExecutionResult:
-        prepared = self.prepare(call)
+        prepared = await self.prepare(call)
         if isinstance(prepared, ToolExecutionResult):
             return prepared
         return await self.execute_prepared(prepared)
 
-    def prepare(self, call: ToolCall) -> PreparedToolCall | ToolExecutionResult:
+    async def prepare(self, call: ToolCall) -> PreparedToolCall | ToolExecutionResult:
         """完成参数和权限检查，但不启动实际工具。"""
 
         tool = self._registry.get(call.name)
@@ -85,7 +85,7 @@ class ToolExecutor:
             )
 
         if self._permissions is not None:
-            decision = self._permissions.authorize(call, tool.definition, arguments)
+            decision = await self._permissions.authorize_async(call, tool.definition, arguments)
             if not decision.allowed:
                 return self._failure(
                     call,

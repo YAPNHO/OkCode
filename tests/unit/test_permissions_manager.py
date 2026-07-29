@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from okcode.errors import ExitRequested
 from okcode.models import ToolCall
 from okcode.permissions.manager import PermissionManager
 from okcode.permissions.models import (
@@ -125,6 +126,13 @@ def test_unmatched_calls_follow_permission_mode(
 
     assert decision.allowed is expected_allowed
     assert decision.source is expected_source
+
+
+def test_exit_confirmation_propagates_to_the_application(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, confirmation=PermissionConfirmation.EXIT)
+
+    with pytest.raises(ExitRequested):
+        _ = _authorize_command(manager, "git status")
 
 
 def test_permanent_allow_writes_local_rule_and_outside_path_stays_sandboxed(tmp_path: Path) -> None:

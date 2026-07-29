@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.rule import Rule
 
 from okcode.errors import ProviderError
+from okcode.mcp.models import McpDiscoveryWarning
 from okcode.models import (
     AgentProgress,
     AgentStopped,
@@ -59,22 +60,23 @@ class TerminalUI:
             f"OkCode | {config.name} | {config.protocol} | {config.model} | 权限：{permission_mode}"
         )
 
-    def confirm_permission(self, request: PermissionRequest) -> PermissionConfirmation:
-        """在默认权限模式下读取一次明确的用户决定。"""
+    async def confirm_permission(self, request: PermissionRequest) -> PermissionConfirmation:
+        """在运行中的事件循环内等待一次明确的用户决定。"""
 
         target = request.display_target or "无主操作目标"
         self._console.print(f"权限确认：{request.call.name} -> {target}", style="yellow")
         self._console.print("此操作可能修改项目或影响系统，请确认是否允许。", style="yellow")
-        self._console.print("选择：d=拒绝，o=仅本次，s=本会话，p=永久允许", style="dim")
+        self._console.print("选择：d=拒绝，o=仅本次，s=本会话，p=永久允许，/exit=退出", style="dim")
         try:
             session = self._session
             if session is None:
                 session = PromptSession(history=InMemoryHistory())
                 self._session = session
-            choice = session.prompt("权限 > ").strip().lower()
+            choice = (await session.prompt_async("权限 > ")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return PermissionConfirmation.DENY
         choices = {
+            "/exit": PermissionConfirmation.EXIT,
             "o": PermissionConfirmation.ONCE,
             "s": PermissionConfirmation.SESSION,
             "p": PermissionConfirmation.PERMANENT,
@@ -136,6 +138,14 @@ class TerminalUI:
 
     def show_startup_error(self) -> None:
         self._console.print("启动失败，请检查配置和依赖。")
+
+    def show_mcp_warning(self, warning: McpDiscoveryWarning) -> None:
+        """显示不包含连接详情或凭据的 MCP Server 启动告警。"""
+
+        self._console.print(
+            f"MCP：Server {warning.server_name} 在{warning.phase}阶段不可用。{warning.message}",
+            style="yellow",
+        )
 
     def show_goodbye(self) -> None:
         self._finish_line()

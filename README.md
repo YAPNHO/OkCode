@@ -20,6 +20,7 @@ OkCode 是一个使用 Python 实现的终端 AI 编程助手。它在当前工�
 - 系统提示按身份、系统约束、任务模式、动作执行、工具使用、语气风格和文本输出七个稳定模块组织。环境和模式提示以系统级补充消息注入，不会混入普通对话历史。
 - 支持可选的提示缓存路由，并在 Provider 返回缓存用量字段时显示缓存读取、缓存写入 Token；不会猜测或伪造缓存命中结果。
 - 内置五层本地工具权限控制：Windows 高危命令黑名单、项目路径沙箱、分层 YAML 规则、会话权限模式和默认确认。权限拒绝会作为工具结果回灌模型，Agent Loop 可以调整策略继续执行。
+- 支持通过 MCP 接入外部工具：启动时发现 stdio 或 Streamable HTTP Server 的工具，并以统一工具接口交给 Agent Loop 调用。
 
 ## 安装
 
@@ -56,6 +57,37 @@ providers:
 `active` 必须对应某个 Provider 的 `name`；`protocol` 仅支持 `openai` 和 `anthropic`。`thinking` 默认为 `false`，开启后会向对应协议请求其支持的思考流。
 
 `prompt_cache` 默认为 `false`。仅当所选 Provider 明确支持提示缓存时才应开启：OkCode 会把稳定的系统提示和工具声明作为缓存前缀，而把工作区、日期、可用工具和任务模式等动态信息放入系统级补充消息。缓存是否实际命中以 Provider 返回的 usage 字段为准。
+
+## MCP Server 配置
+
+MCP Server 与 Provider 配置分开管理。OkCode 会按以下顺序读取 `mcp_servers`，项目级同名 Server 会完整覆盖用户级配置：
+
+| 来源 | 路径 |
+| --- | --- |
+| 用户级 | `%USERPROFILE%/.okcode/config.yaml` |
+| 项目级 | `<项目>/.okcode/config.yaml` |
+
+两份文件都可以缺失。每个配置文件只包含 `mcp_servers`：
+
+```yaml
+mcp_servers:
+  filesystem:
+    transport: stdio
+    command: uvx
+    args: ["@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"]
+    env:
+      API_TOKEN: "${FILESYSTEM_TOKEN}"
+
+  remote_search:
+    transport: streamable_http
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer ${SEARCH_TOKEN}"
+```
+
+`args`、`env`、`url` 和 `headers` 的值支持 `${变量名}` 展开；引用未定义变量会以配置错误结束启动，且不会输出变量值。stdio 子进程会继承当前系统环境，配置中的 `env` 仅覆盖同名变量。
+
+发现到的工具名称为 `mcp__<server>__<tool>`，避免与内置工具或其他 Server 冲突。远端工具默认按有副作用处理，因此会继续经过现有权限规则和默认确认。单个 Server 无法连接、握手或发现失败时会显示启动告警，但不会阻止内置工具和其他 MCP Server 使用；本版本不会自动重连。
 
 ## 运行
 
@@ -127,4 +159,4 @@ uv run ruff check .
 
 ## 当前范围
 
-当前版本尚未接入真实 MCP、项目指令文件加载、自动长期记忆和自动化效果评估。这些能力在提示结构中保留了扩展位置，但不会在运行时自动生效。
+当前版本不支持 MCP 资源、提示词、采样、根目录协商、OAuth 专用认证、健康检查和自动重连；图片、音频与嵌入资源等非文本工具结果也不会交给模型处理。项目指令文件加载、自动长期记忆和自动化效果评估仍在后续范围。

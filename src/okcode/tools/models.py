@@ -24,6 +24,9 @@ class ToolErrorCode(StrEnum):
     COMMAND_FAILED = "command_failed"
     PERMISSION_DENIED = "permission_denied"
     TIMEOUT = "timeout"
+    MCP_TOOL_ERROR = "mcp_tool_error"
+    MCP_UNAVAILABLE = "mcp_unavailable"
+    MCP_UNSUPPORTED_RESULT = "mcp_unsupported_result"
     INTERNAL_ERROR = "internal_error"
 
 

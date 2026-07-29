@@ -4,7 +4,7 @@ import asyncio
 
 from okcode.app import OkCodeApp
 from okcode.conversation import ConversationSession
-from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.errors import ExitRequested, ProviderError, ProviderErrorKind
 from okcode.models import (
     AgentProgress,
     ChatMessage,
@@ -98,10 +98,28 @@ class InterruptRunner:
         raise KeyboardInterrupt
 
 
+class ExitRunner:
+    def run(self, coroutine: object) -> object:
+        close = getattr(coroutine, "close", None)
+        if callable(close):
+            close()
+        raise ExitRequested
+
+
 def test_keyboard_interrupt_shows_cancelled_and_returns_to_prompt() -> None:
     provider = FakeProvider([])
     ui = FakeTerminal(["问题", "/exit"])
     app = OkCodeApp(ui, _conversation(provider), InterruptRunner(), _config())  # type: ignore[arg-type]
     assert app.run() == 0
     assert ui.cancelled == 1
+    assert ui.goodbyes == 1
+
+
+def test_exit_from_permission_prompt_exits_the_app() -> None:
+    provider = FakeProvider([])
+    ui = FakeTerminal(["问题"])
+    app = OkCodeApp(ui, _conversation(provider), ExitRunner(), _config())  # type: ignore[arg-type]
+
+    assert app.run() == 0
+    assert ui.cancelled == 0
     assert ui.goodbyes == 1

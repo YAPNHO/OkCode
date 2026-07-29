@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from okcode.conversation import ConversationSession
-from okcode.errors import ProviderError
+from okcode.errors import ExitRequested, ProviderError
 from okcode.models import ProviderConfig
 from okcode.terminal import TerminalUI
 
@@ -36,6 +36,9 @@ class OkCodeApp:
                 continue
             try:
                 self._runner.run(self._consume_turn(text))
+            except ExitRequested:
+                self._ui.show_goodbye()
+                return 0
             except KeyboardInterrupt:
                 self._ui.show_cancelled()
             except ProviderError as error:

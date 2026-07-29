@@ -6,6 +6,7 @@ from io import StringIO
 from rich.console import Console
 
 from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.mcp.models import McpDiscoveryWarning
 from okcode.models import (
     AgentProgress,
     AgentStopped,
@@ -35,6 +36,9 @@ class StubSession:
         if isinstance(value, BaseException):
             raise value
         return str(value)
+
+    async def prompt_async(self, prompt: str) -> str:
+        return self.prompt(prompt)
 
 
 def _ui(values: list[object] | None = None) -> tuple[TerminalUI, StringIO]:
@@ -87,6 +91,15 @@ def test_error_hides_raw_secret() -> None:
     ui.show_error(ProviderError(ProviderErrorKind.BAD_REQUEST, "安全消息", status_code=400))
     assert "安全消息" in output.getvalue()
     assert "OKCODE_SECRET_DO_NOT_PRINT_7429" not in output.getvalue()
+
+
+def test_mcp_warning_shows_only_safe_server_diagnostic() -> None:
+    ui, output = _ui()
+    ui.show_mcp_warning(McpDiscoveryWarning("remote", "初始化", "MCP Server 在初始化阶段失败。"))
+    text = " ".join(_plain_text(output).split())
+    assert "MCP：Server remote 在初始化阶段不可用" in text
+    assert "MCP Server 在初始化阶段失败。" in text
+    assert "Authorization" not in text
 
 
 def test_tool_events_show_short_status_without_full_json() -> None:
@@ -160,23 +173,24 @@ def _permission_request() -> PermissionRequest:
     )
 
 
-def test_permission_confirmation_maps_choices_and_safe_failures_to_deny() -> None:
+async def test_permission_confirmation_maps_choices_and_safe_failures_to_deny() -> None:
     choices = {
         "o": PermissionConfirmation.ONCE,
         "s": PermissionConfirmation.SESSION,
         "p": PermissionConfirmation.PERMANENT,
         "d": PermissionConfirmation.DENY,
+        "/exit": PermissionConfirmation.EXIT,
         "unexpected": PermissionConfirmation.DENY,
     }
     for value, expected in choices.items():
         ui, _ = _ui([value])
-        assert ui.confirm_permission(_permission_request()) is expected
+        assert await ui.confirm_permission(_permission_request()) is expected
 
     ui, _ = _ui([EOFError()])
-    assert ui.confirm_permission(_permission_request()) is PermissionConfirmation.DENY
+    assert await ui.confirm_permission(_permission_request()) is PermissionConfirmation.DENY
 
     ui, output = _ui(["d"])
-    _ = ui.confirm_permission(_permission_request())
+    _ = await ui.confirm_permission(_permission_request())
     assert "可能修改项目或影响系统" in _plain_text(output)
 
 
