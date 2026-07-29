@@ -4,6 +4,7 @@ from okcode.prompt import (
     PromptBuildContext,
     PromptBuilder,
     PromptOptionalSections,
+    SystemInstruction,
     TurnKind,
 )
 from okcode.tools.models import ToolDefinition, ToolSafety
@@ -109,3 +110,30 @@ def test_global_tool_section_repeats_all_critical_rules() -> None:
 
     for text in ("优先使用专用工具", "编辑前必须先读取", "不要把代码块伪造成工具结果", "保持谨慎"):
         assert text in bundle.stable_system
+
+
+def test_context_supplements_are_dynamic_ordered_and_not_cached() -> None:
+    builder = PromptBuilder()
+    baseline = builder.build(_context(), _tools())
+    bundle = builder.build(
+        PromptBuildContext(
+            workspace_root="D:/workspace",
+            platform="Windows",
+            current_date="2026-07-29",
+            available_tool_names=("read_file",),
+            additional_system_instructions=(
+                SystemInstruction("context_boundary", "重新读取文件", 91),
+                SystemInstruction("context_summary", "九段正式摘要", 90),
+            ),
+        ),
+        _tools(),
+    )
+
+    assert [instruction.kind for instruction in bundle.dynamic_system] == [
+        "environment",
+        "context_summary",
+        "context_boundary",
+    ]
+    assert "九段正式摘要" in bundle.debug_full_prompt
+    assert "重新读取文件" in bundle.debug_full_prompt
+    assert bundle.cache_key == baseline.cache_key

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from okcode.context import ArtifactStore, ContextConfig, ContextManager
 from okcode.conversation import AgentConfig, ConversationSession
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.mcp.models import McpCallResult, McpRemoteToolInfo
@@ -18,6 +19,7 @@ from okcode.models import (
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
+    TokenUsage,
     TokenUsageReported,
     ToolCall,
     ToolCallRequested,
@@ -49,6 +51,7 @@ def _session(
     registry: ToolRegistry | None = None,
     *,
     config: AgentConfig | None = None,
+    context_manager: ContextManager | None = None,
 ) -> ConversationSession:
     actual_registry = registry or ToolRegistry()
     return ConversationSession(
@@ -56,6 +59,7 @@ def _session(
         actual_registry,
         ToolExecutor(actual_registry),
         config=config,
+        context_manager=context_manager,
     )
 
 
@@ -527,3 +531,132 @@ async def test_permissions_command_does_not_call_provider_or_change_history(tmp_
     assert status_events[0].current_mode == "strict"
     assert invalid_events[0].current_mode == "strict"
     assert invalid_events[0].message == "权限模式只能是 strict、default 或 allow。"
+
+
+def _summary_response() -> str:
+    headings = (
+        "主要请求和意图",
+        "关键技术概念",
+        "文件和代码段",
+        "错误和修复",
+        "问题解决过程",
+        "所有用户消息",
+        "待办任务",
+        "当前工作",
+        "可能的下一步",
+    )
+    sections = [
+        f"## {heading}\n"
+        + ("{{ALL_USER_MESSAGES}}" if heading == "所有用户消息" else f"{heading}内容")
+        for heading in headings
+    ]
+    return (
+        "<analysis_draft>内部草稿</analysis_draft><formal_summary>"
+        + "\n".join(sections)
+        + "</formal_summary>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_automatic_summary_runs_before_normal_request_and_records_usage(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "初始回答"), TokenUsage(input_tokens=8))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, _summary_response()))],
+            [
+                StreamCompleted(
+                    ChatMessage(Role.ASSISTANT, "压缩后继续"),
+                    TokenUsage(input_tokens=9),
+                )
+            ],
+        ]
+    )
+    context = ContextManager(
+        ArtifactStore(tmp_path, "automatic"),
+        ContextConfig(
+            context_window_tokens=200,
+            automatic_compaction_tokens=167,
+            summary_output_reserve_tokens=20,
+            safety_margin_tokens=13,
+            retain_recent_tokens=1,
+            retain_recent_messages=1,
+        ),
+    )
+    session = _session(provider, context_manager=context)
+
+    _ = [event async for event in session.stream_turn("第一轮")]
+    events = [event async for event in session.stream_turn("x" * 1_000)]
+
+    assert len(provider.provider_requests) == 3
+    assert provider.provider_requests[1].tools == ()
+    assert provider.provider_requests[2].messages[-1].content == "x" * 1_000
+    dynamic_kinds = [item.kind for item in provider.provider_requests[2].prompt.dynamic_system]
+    assert "context_summary" in dynamic_kinds
+    assert "context_boundary" in dynamic_kinds
+    assert not any(getattr(event, "delta", "") == "内部草稿" for event in events)
+    assert context.state.estimate_anchor is not None
+    assert context.state.estimate_anchor.input_tokens == 9
+
+
+@pytest.mark.asyncio
+async def test_compact_forces_summary_in_short_history_and_skips_empty_history(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "已有回答"))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, _summary_response()))],
+        ]
+    )
+    session = _session(
+        provider,
+        context_manager=ContextManager(ArtifactStore(tmp_path, "manual")),
+    )
+
+    _ = [event async for event in session.stream_turn("短会话")]
+    events = [event async for event in session.stream_turn("/compact")]
+
+    assert len(provider.provider_requests) == 2
+    assert provider.provider_requests[-1].tools == ()
+    assert any(isinstance(event, AgentProgress) for event in events)
+
+    empty_provider = FakeProvider([])
+    empty_session = _session(
+        empty_provider,
+        context_manager=ContextManager(ArtifactStore(tmp_path, "empty")),
+    )
+    empty_events = [event async for event in empty_session.stream_turn("/compact")]
+    assert empty_provider.requests == []
+    assert empty_events == [AgentProgress("没有可压缩的已完成历史。")]
+
+
+@pytest.mark.asyncio
+async def test_three_summary_failures_open_circuit_without_changing_history(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [[StreamCompleted(ChatMessage(Role.ASSISTANT, "格式错误"))] for _ in range(3)]
+    )
+    session = _session(
+        provider,
+        context_manager=ContextManager(ArtifactStore(tmp_path, "circuit")),
+    )
+    session._messages = (ChatMessage(Role.USER, "已有请求"),)  # type: ignore[attr-defined]
+    original = session.messages
+
+    first = [event async for event in session.stream_turn("/compact")]
+    second = [event async for event in session.stream_turn("/compact")]
+    third = [event async for event in session.stream_turn("/compact")]
+    fourth = [event async for event in session.stream_turn("/compact")]
+
+    assert len(provider.provider_requests) == 3
+    assert session.messages == original
+    assert first[-1].reason is AgentStopReason.CONTEXT_COMPACTION_FAILED
+    assert second[-1].reason is AgentStopReason.CONTEXT_COMPACTION_FAILED
+    assert third[-1].reason is AgentStopReason.CONTEXT_SUMMARY_CIRCUIT_OPEN
+    assert fourth == [
+        AgentStopped(
+            AgentStopReason.CONTEXT_SUMMARY_CIRCUIT_OPEN,
+            "上下文摘要连续失败 3 次，当前会话已熔断，不再发起摘要请求。",
+        )
+    ]

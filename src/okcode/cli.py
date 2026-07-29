@@ -7,6 +7,7 @@ from pathlib import Path
 
 from okcode.app import OkCodeApp
 from okcode.config import load_config
+from okcode.context import ArtifactStore, ContextManager
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
 from okcode.mcp import McpClientManager, McpConfigPaths, load_mcp_config
@@ -68,6 +69,7 @@ def main() -> int:
             ToolExecutor(registry, permissions=permissions),
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
             permissions=permissions,
+            context_manager=ContextManager(ArtifactStore(workspace.root)),
         )
         for warning in warnings:
             ui.show_mcp_warning(warning)

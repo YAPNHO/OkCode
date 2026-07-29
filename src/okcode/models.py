@@ -179,6 +179,8 @@ class AgentStopReason(StrEnum):
     NO_SAVED_PLAN = "no_saved_plan"
     ITERATION_LIMIT = "iteration_limit"
     UNKNOWN_TOOL_LIMIT = "unknown_tool_limit"
+    CONTEXT_COMPACTION_FAILED = "context_compaction_failed"
+    CONTEXT_SUMMARY_CIRCUIT_OPEN = "context_summary_circuit_open"
 
 
 @dataclass(frozen=True, slots=True)

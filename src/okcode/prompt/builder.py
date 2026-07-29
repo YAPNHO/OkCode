@@ -60,6 +60,7 @@ class PromptBuildContext:
     turn_kind: TurnKind = TurnKind.NORMAL
     iteration: int = 1
     optional_sections: PromptOptionalSections = field(default_factory=PromptOptionalSections)
+    additional_system_instructions: tuple[SystemInstruction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ class PromptBuilder:
             )
             for section in optional
         )
+        dynamic.extend(context.additional_system_instructions)
         mode_instruction = self._mode_planner.build(context.turn_kind, context.iteration)
         if mode_instruction is not None:
             dynamic.append(SystemInstruction("task_mode", mode_instruction, priority=120))
@@ -124,6 +126,12 @@ class PromptBuilder:
         debug_sections.extend(
             PromptSection(section.name, section.priority, section.content, cacheable=False)
             for section in optional
+        )
+        debug_sections.extend(
+            PromptSection(
+                instruction.kind, instruction.priority, instruction.content, cacheable=False
+            )
+            for instruction in context.additional_system_instructions
         )
         return PromptBundle(
             stable_system=stable_system,
