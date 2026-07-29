@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+import platform as host_platform
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.models import (
@@ -12,6 +15,7 @@ from okcode.models import (
     AgentStopped,
     AgentStopReason,
     ChatMessage,
+    ProviderRequest,
     Role,
     StreamCompleted,
     TokenUsageReported,
@@ -20,6 +24,13 @@ from okcode.models import (
     ToolExecutionFinished,
     ToolExecutionStarted,
     TurnEvent,
+)
+from okcode.prompt import (
+    PromptBuildContext,
+    PromptBuilder,
+    PromptCachePolicy,
+    TurnKind,
+    enhance_tool_definitions,
 )
 from okcode.providers.base import LLMProvider
 from okcode.tools.executor import ToolExecutor
@@ -53,11 +64,18 @@ class ConversationSession:
         executor: ToolExecutor,
         *,
         config: AgentConfig | None = None,
+        prompt_builder: PromptBuilder | None = None,
+        context_factory: Callable[[TurnKind, int, Sequence[ToolDefinition]], PromptBuildContext]
+        | None = None,
+        cache_policy: PromptCachePolicy | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._executor = executor
         self._config = config or AgentConfig()
+        self._prompt_builder = prompt_builder or PromptBuilder()
+        self._context_factory = context_factory or _default_context_factory
+        self._cache_policy = cache_policy or PromptCachePolicy()
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
 
@@ -83,7 +101,12 @@ class ConversationSession:
                 return
             user_message = ChatMessage(role=Role.USER, content=task)
             tools = self._registry.definitions_by_safety(ToolSafety.READ_ONLY)
-            async for event in self._run_agent(user_message, tools, save_plan_task=task):
+            async for event in self._run_agent(
+                user_message,
+                tools,
+                save_plan_task=task,
+                turn_kind=TurnKind.PLAN,
+            ):
                 yield event
             return
 
@@ -98,12 +121,20 @@ class ConversationSession:
                 role=Role.USER,
                 content="请执行当前会话最近一次计划：\n" + self._saved_plan.content,
             )
-            async for event in self._run_agent(user_message, self._registry.definitions()):
+            async for event in self._run_agent(
+                user_message,
+                self._registry.definitions(),
+                turn_kind=TurnKind.DO,
+            ):
                 yield event
             return
 
         user_message = ChatMessage(role=Role.USER, content=user_text)
-        async for event in self._run_agent(user_message, self._registry.definitions()):
+        async for event in self._run_agent(
+            user_message,
+            self._registry.definitions(),
+            turn_kind=TurnKind.NORMAL,
+        ):
             yield event
 
     async def _run_agent(
@@ -112,6 +143,7 @@ class ConversationSession:
         tools: Sequence[ToolDefinition],
         *,
         save_plan_task: str | None = None,
+        turn_kind: TurnKind,
     ) -> AsyncIterator[TurnEvent]:
         pending: list[ChatMessage] = [user_message]
         consecutive_unknown_tools = 0
@@ -119,7 +151,16 @@ class ConversationSession:
         for iteration in range(1, self._config.max_iterations + 1):
             yield AgentProgress(f"模型迭代 {iteration}/{self._config.max_iterations}", iteration)
             completed: StreamCompleted | None = None
-            async for event in self._provider.stream((*self._messages, *pending), tools):
+            visible_tools = enhance_tool_definitions(tools)
+            context = self._context_factory(turn_kind, iteration, visible_tools)
+            prompt = self._prompt_builder.build(context, visible_tools)
+            request = ProviderRequest(
+                messages=(*self._messages, *pending),
+                tools=visible_tools,
+                prompt=prompt,
+                cache=self._cache_policy,
+            )
+            async for event in self._provider.stream(request):
                 if isinstance(event, StreamCompleted):
                     if completed is not None:
                         raise ProviderError(ProviderErrorKind.STREAM, "模型流返回了多个完成事件。")
@@ -180,9 +221,7 @@ class ConversationSession:
                 result = await self._executor.execute(batch[0][1])
                 yield ToolExecutionFinished(result)
             else:
-                results = await asyncio.gather(
-                    *(self._executor.execute(call) for _, call in batch)
-                )
+                results = await asyncio.gather(*(self._executor.execute(call) for _, call in batch))
                 for result in results:
                     yield ToolExecutionFinished(result)
 
@@ -207,3 +246,20 @@ class ConversationSession:
     def _is_read_only(self, call: ToolCall) -> bool:
         tool = self._registry.get(call.name)
         return tool is not None and tool.definition.safety is ToolSafety.READ_ONLY
+
+
+def _default_context_factory(
+    turn_kind: TurnKind,
+    iteration: int,
+    tools: Sequence[ToolDefinition],
+) -> PromptBuildContext:
+    """从当前进程环境构造请求级动态提示上下文。"""
+
+    return PromptBuildContext(
+        workspace_root=str(Path.cwd()),
+        platform=host_platform.platform(),
+        current_date=date.today().isoformat(),
+        available_tool_names=tuple(tool.name for tool in tools),
+        turn_kind=turn_kind,
+        iteration=iteration,
+    )

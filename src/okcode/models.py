@@ -3,7 +3,9 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from okcode.tools.models import ToolExecutionResult
+from okcode.prompt.builder import PromptBundle
+from okcode.prompt.cache import PromptCachePolicy, PromptCacheUsage
+from okcode.tools.models import ToolDefinition, ToolExecutionResult
 
 
 class ProviderProtocol(StrEnum):
@@ -23,6 +25,7 @@ class ProviderConfig:
     base_url: str
     api_key: str = field(repr=False)
     thinking: bool = False
+    prompt_cache: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +68,7 @@ class TokenUsage:
     output_tokens: int | None = None
     total_tokens: int | None = None
     available: bool = False
+    cache: PromptCacheUsage = field(default_factory=PromptCacheUsage.unavailable)
 
     @classmethod
     def unavailable(cls) -> "TokenUsage":
@@ -111,6 +115,16 @@ class ChatMessage:
                 raise ValueError("助手消息必须包含文本或工具调用，且不能包含工具结果。")
         if self.role is Role.TOOL and (not tool_results or self.content or tool_calls):
             raise ValueError("工具消息必须只包含工具结果。")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequest:
+    """一次模型调用的普通历史、提示包、工具和缓存策略。"""
+
+    messages: tuple[ChatMessage, ...]
+    tools: tuple[ToolDefinition, ...]
+    prompt: PromptBundle
+    cache: PromptCachePolicy
 
 
 @dataclass(frozen=True, slots=True)

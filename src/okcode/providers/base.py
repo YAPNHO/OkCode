@@ -1,10 +1,9 @@
 """Provider 抽象接口。"""
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from typing import Protocol
 
-from okcode.models import ChatMessage, StreamEvent
-from okcode.tools.models import ToolDefinition
+from okcode.models import ProviderRequest, StreamEvent
 
 
 class LLMProvider(Protocol):
@@ -12,8 +11,7 @@ class LLMProvider(Protocol):
 
     def stream(
         self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolDefinition],
+        request: ProviderRequest,
     ) -> AsyncIterator[StreamEvent]:
         """流式生成一轮回复。"""
 

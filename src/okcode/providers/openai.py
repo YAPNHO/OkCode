@@ -14,6 +14,7 @@ from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.models import (
     ChatMessage,
     ProviderConfig,
+    ProviderRequest,
     Role,
     StreamCompleted,
     StreamEvent,
@@ -22,6 +23,8 @@ from okcode.models import (
     TokenUsage,
     ToolCall,
 )
+from okcode.prompt.builder import PromptBundle
+from okcode.prompt.cache import PromptCachePolicy, PromptCacheUsage
 from okcode.tools.models import ToolDefinition
 
 
@@ -39,15 +42,14 @@ class OpenAIProvider:
 
     def stream(
         self,
-        messages: Sequence[ChatMessage],
+        request: ProviderRequest | Sequence[ChatMessage],
         tools: Sequence[ToolDefinition] = (),
     ) -> AsyncIterator[StreamEvent]:
-        return self._stream(messages, tools)
+        return self._stream(_coerce_request(request, tools))
 
     async def _stream(
         self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolDefinition],
+        request_data: ProviderRequest,
     ) -> AsyncIterator[StreamEvent]:
         started = False
         saw_finish_reason = False
@@ -56,13 +58,18 @@ class OpenAIProvider:
         try:
             request: dict[str, Any] = {
                 "model": self._config.model,
-                "messages": self._serialize_messages(messages),
+                "messages": [
+                    *self._serialize_prompt_messages(request_data.prompt),
+                    *self._serialize_messages(request_data.messages),
+                ],
                 "stream": True,
             }
             if self._config.thinking:
                 request["extra_body"] = {"thinking": {"type": "enabled"}}
-            if tools:
-                request["tools"] = [_serialize_tool_definition(tool) for tool in tools]
+            if request_data.tools:
+                request["tools"] = [_serialize_tool_definition(tool) for tool in request_data.tools]
+            if request_data.cache.enabled:
+                request["prompt_cache_key"] = request_data.prompt.cache_key
             request["stream_options"] = {"include_usage": True}
 
             stream = await self._client.chat.completions.create(**request)
@@ -161,6 +168,24 @@ class OpenAIProvider:
                 raise ValueError("无法序列化无效的 OpenAI 会话消息。")
         return result
 
+    def _serialize_prompt_messages(self, prompt: PromptBundle) -> list[dict[str, Any]]:
+        """将请求级提示单独序列化，避免进入普通会话历史。"""
+
+        result: list[dict[str, Any]] = []
+        if prompt.stable_system:
+            result.append({"role": "system", "content": prompt.stable_system})
+        if prompt.dynamic_system:
+            role = "developer" if "api.openai.com" in self._config.base_url else "system"
+            result.append(
+                {
+                    "role": role,
+                    "content": "\n\n".join(
+                        instruction.render() for instruction in prompt.dynamic_system
+                    ),
+                }
+            )
+        return result
+
 
 @dataclass
 class _OpenAIToolCallParts:
@@ -179,6 +204,22 @@ def _serialize_tool_definition(tool: ToolDefinition) -> dict[str, object]:
             "parameters": dict(tool.input_schema),
         },
     }
+
+
+def _coerce_request(
+    request: ProviderRequest | Sequence[ChatMessage],
+    tools: Sequence[ToolDefinition],
+) -> ProviderRequest:
+    """兼容现有直接传消息和工具的 Provider 集成测试。"""
+
+    if isinstance(request, ProviderRequest):
+        return request
+    return ProviderRequest(
+        messages=tuple(request),
+        tools=tuple(tools),
+        prompt=PromptBundle("", (), "", ""),
+        cache=PromptCachePolicy(),
+    )
 
 
 def _accumulate_tool_call(states: dict[int, _OpenAIToolCallParts], raw_call: object) -> None:
@@ -222,14 +263,43 @@ def _usage_from_object(value: object | None, fallback: TokenUsage) -> TokenUsage
     input_tokens = getattr(value, "prompt_tokens", None)
     output_tokens = getattr(value, "completion_tokens", None)
     total_tokens = getattr(value, "total_tokens", None)
+    details = _extension_value(value, "prompt_tokens_details")
+    cached_tokens = _integer_field(details, "cached_tokens")
+    write_tokens = _integer_field(details, "cache_write_tokens")
+    cache = (
+        PromptCacheUsage(
+            read_tokens=cached_tokens,
+            write_tokens=write_tokens,
+            available=True,
+        )
+        if cached_tokens is not None or write_tokens is not None
+        else fallback.cache
+    )
     if input_tokens is None and output_tokens is None and total_tokens is None:
-        return fallback
+        if cache is fallback.cache:
+            return fallback
+        return TokenUsage(
+            input_tokens=fallback.input_tokens,
+            output_tokens=fallback.output_tokens,
+            total_tokens=fallback.total_tokens,
+            available=fallback.available,
+            cache=cache,
+        )
     return TokenUsage(
         input_tokens=input_tokens if isinstance(input_tokens, int) else None,
         output_tokens=output_tokens if isinstance(output_tokens, int) else None,
         total_tokens=total_tokens if isinstance(total_tokens, int) else None,
         available=True,
+        cache=cache,
     )
+
+
+def _integer_field(value: object | None, name: str) -> int | None:
+    if isinstance(value, dict):
+        candidate = value.get(name)
+    else:
+        candidate = getattr(value, name, None)
+    return candidate if isinstance(candidate, int) else None
 
 
 def _extension_value(value: object, name: str) -> object | None:

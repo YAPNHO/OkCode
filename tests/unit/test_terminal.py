@@ -19,6 +19,7 @@ from okcode.models import (
     ToolExecutionFinished,
     ToolExecutionStarted,
 )
+from okcode.prompt import PromptCacheUsage
 from okcode.terminal import TerminalUI
 from okcode.tools.models import ToolErrorCode, ToolExecutionResult
 
@@ -122,3 +123,25 @@ def test_agent_events_show_progress_usage_and_stop_message() -> None:
     assert "模型请求 read_file" in text
     assert "Token：第 1 轮用量不可用。" in text
     assert "停止：没有可执行的计划" in text
+
+
+def test_token_usage_shows_real_cache_fields_when_available() -> None:
+    ui, output = _ui()
+    ui.render_event(
+        TokenUsageReported(
+            TokenUsage(
+                input_tokens=20,
+                output_tokens=3,
+                total_tokens=23,
+                available=True,
+                cache=PromptCacheUsage(read_tokens=12, write_tokens=8, available=True),
+            ),
+            1,
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "输入 20" in text
+    assert "缓存读取 12" in text
+    assert "缓存写入 8" in text

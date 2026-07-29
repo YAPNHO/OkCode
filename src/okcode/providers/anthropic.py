@@ -14,6 +14,7 @@ from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.models import (
     ChatMessage,
     ProviderConfig,
+    ProviderRequest,
     Role,
     StreamCompleted,
     StreamEvent,
@@ -22,6 +23,8 @@ from okcode.models import (
     TokenUsage,
     ToolCall,
 )
+from okcode.prompt.builder import PromptBundle
+from okcode.prompt.cache import PromptCachePolicy, PromptCacheUsage
 from okcode.tools.models import ToolDefinition
 
 _MAX_TOKENS = 4096
@@ -43,15 +46,14 @@ class AnthropicProvider:
 
     def stream(
         self,
-        messages: Sequence[ChatMessage],
+        request: ProviderRequest | Sequence[ChatMessage],
         tools: Sequence[ToolDefinition] = (),
     ) -> AsyncIterator[StreamEvent]:
-        return self._stream(messages, tools)
+        return self._stream(_coerce_request(request, tools))
 
     async def _stream(
         self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolDefinition],
+        request_data: ProviderRequest,
     ) -> AsyncIterator[StreamEvent]:
         started = False
         saw_message_stop = False
@@ -59,15 +61,25 @@ class AnthropicProvider:
             request: dict[str, Any] = {
                 "model": self._config.model,
                 "max_tokens": _MAX_TOKENS,
-                "messages": self._serialize_messages(messages),
+                "messages": self._serialize_messages(request_data.messages),
             }
+            system = _serialize_system(request_data.prompt, request_data.cache)
+            if system:
+                request["system"] = system
             if self._config.thinking:
                 request["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": _THINKING_BUDGET_TOKENS,
                 }
-            if tools:
-                request["tools"] = [_serialize_tool_definition(tool) for tool in tools]
+            if request_data.tools:
+                request["tools"] = [
+                    _serialize_tool_definition(
+                        tool,
+                        cache_control=request_data.cache.enabled
+                        and index == len(request_data.tools) - 1,
+                    )
+                    for index, tool in enumerate(request_data.tools)
+                ]
                 request["tool_choice"] = {"type": "auto"}
 
             tool_input_parts: dict[int, list[str]] = {}
@@ -215,12 +227,53 @@ def _extract_tool_blocks(message: Any) -> list[tuple[int, Any]]:
     ]
 
 
-def _serialize_tool_definition(tool: ToolDefinition) -> dict[str, object]:
-    return {
+def _serialize_tool_definition(
+    tool: ToolDefinition,
+    *,
+    cache_control: bool = False,
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "name": tool.name,
         "description": tool.description,
         "input_schema": dict(tool.input_schema),
     }
+    if cache_control:
+        result["cache_control"] = {"type": "ephemeral"}
+    return result
+
+
+def _serialize_system(
+    prompt: PromptBundle,
+    cache: PromptCachePolicy,
+) -> list[dict[str, object]]:
+    """将稳定提示和动态补充分成 Anthropic system blocks。"""
+
+    result: list[dict[str, object]] = []
+    if prompt.stable_system:
+        stable: dict[str, object] = {"type": "text", "text": prompt.stable_system}
+        if cache.enabled:
+            stable["cache_control"] = {"type": "ephemeral", "ttl": cache.ttl}
+        result.append(stable)
+    result.extend(
+        {"type": "text", "text": instruction.render()} for instruction in prompt.dynamic_system
+    )
+    return result
+
+
+def _coerce_request(
+    request: ProviderRequest | Sequence[ChatMessage],
+    tools: Sequence[ToolDefinition],
+) -> ProviderRequest:
+    """兼容现有直接传消息和工具的 Provider 集成测试。"""
+
+    if isinstance(request, ProviderRequest):
+        return request
+    return ProviderRequest(
+        messages=tuple(request),
+        tools=tuple(tools),
+        prompt=PromptBundle("", (), "", ""),
+        cache=PromptCachePolicy(),
+    )
 
 
 def _build_tool_call(block: Any, input_parts: list[str]) -> ToolCall:
@@ -260,13 +313,33 @@ def _usage_from_event(event: object, fallback: TokenUsage) -> TokenUsage:
         usage = getattr(message, "usage", None)
     input_tokens = getattr(usage, "input_tokens", None)
     output_tokens = getattr(usage, "output_tokens", None)
+    read_tokens = getattr(usage, "cache_read_input_tokens", None)
+    write_tokens = getattr(usage, "cache_creation_input_tokens", None)
+    cache = (
+        PromptCacheUsage(
+            read_tokens=read_tokens if isinstance(read_tokens, int) else None,
+            write_tokens=write_tokens if isinstance(write_tokens, int) else None,
+            available=True,
+        )
+        if isinstance(read_tokens, int) or isinstance(write_tokens, int)
+        else fallback.cache
+    )
     if input_tokens is None and output_tokens is None:
-        return fallback
+        if cache is fallback.cache:
+            return fallback
+        return TokenUsage(
+            input_tokens=fallback.input_tokens,
+            output_tokens=fallback.output_tokens,
+            total_tokens=fallback.total_tokens,
+            available=fallback.available,
+            cache=cache,
+        )
     return TokenUsage(
         input_tokens=input_tokens if isinstance(input_tokens, int) else fallback.input_tokens,
         output_tokens=output_tokens if isinstance(output_tokens, int) else fallback.output_tokens,
         total_tokens=None,
         available=True,
+        cache=cache,
     )
 
 

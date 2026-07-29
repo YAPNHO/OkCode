@@ -115,3 +115,27 @@ providers:
 
 def test_default_path_uses_current_working_directory() -> None:
     assert default_config_path() == Path.cwd() / "config.yaml"
+
+
+def test_prompt_cache_is_optional_boolean(tmp_path: Path) -> None:
+    enabled = _write(
+        tmp_path,
+        """
+active: x
+providers:
+  - name: x
+    protocol: openai
+    model: test
+    base_url: https://x.example
+    api_key: secret
+    prompt_cache: true
+""",
+    )
+    assert load_config(enabled).active_provider.prompt_cache is True
+
+    invalid = enabled.with_name("invalid.yaml")
+    invalid.write_text(
+        enabled.read_text(encoding="utf-8").replace("true", '"yes"'), encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="prompt_cache"):
+        load_config(invalid)

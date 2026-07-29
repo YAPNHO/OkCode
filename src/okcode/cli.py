@@ -9,6 +9,7 @@ from okcode.app import OkCodeApp
 from okcode.config import load_config
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
+from okcode.prompt import PromptCachePolicy
 from okcode.providers.factory import create_provider
 from okcode.terminal import TerminalUI
 from okcode.tools.defaults import build_default_registry
@@ -30,8 +31,14 @@ def main() -> int:
     provider = None
     try:
         provider = create_provider(config.active_provider)
-        registry = build_default_registry(Workspace(Path.cwd()))
-        conversation = ConversationSession(provider, registry, ToolExecutor(registry))
+        workspace = Workspace(Path.cwd())
+        registry = build_default_registry(workspace)
+        conversation = ConversationSession(
+            provider,
+            registry,
+            ToolExecutor(registry),
+            cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
+        )
         app = OkCodeApp(ui, conversation, runner, config.active_provider)
         return app.run()
     except Exception:

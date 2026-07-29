@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 
-from okcode.models import ChatMessage, StreamEvent
+from okcode.models import ChatMessage, ProviderRequest, StreamEvent
 from okcode.tools.models import ToolDefinition
 
 
@@ -18,6 +18,7 @@ class FakeProvider:
         else:
             self._scripts = [list(events)]  # type: ignore[arg-type]
         self.requests: list[tuple[ChatMessage, ...]] = []
+        self.provider_requests: list[ProviderRequest] = []
         self.tools: list[tuple[ToolDefinition, ...]] = []
         self.stream_closed = False
         self.stream_closed_count = 0
@@ -25,11 +26,11 @@ class FakeProvider:
 
     def stream(
         self,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[ToolDefinition] = (),
+        request: ProviderRequest,
     ) -> AsyncIterator[StreamEvent]:
-        self.requests.append(tuple(messages))
-        self.tools.append(tuple(tools))
+        self.provider_requests.append(request)
+        self.requests.append(request.messages)
+        self.tools.append(request.tools)
         script = self._scripts.pop(0) if self._scripts else []
         return self._stream(script)
 

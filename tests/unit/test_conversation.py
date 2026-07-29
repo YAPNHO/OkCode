@@ -21,6 +21,7 @@ from okcode.models import (
     ToolExecutionFinished,
     ToolExecutionStarted,
 )
+from okcode.prompt import TurnKind
 from okcode.tools.executor import ToolExecutor
 from okcode.tools.models import (
     JSONValue,
@@ -325,3 +326,35 @@ async def test_do_without_saved_plan_does_not_call_provider() -> None:
         AgentStopped(AgentStopReason.NO_SAVED_PLAN, "没有可执行的计划，请先使用 /plan 生成计划。")
     ]
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_request_prompt_is_not_committed_to_session_history() -> None:
+    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, "完成"))])
+    session = _session(provider)
+
+    _ = [event async for event in session.stream_turn("解释当前项目")]
+
+    request = provider.provider_requests[0]
+    assert request.prompt.stable_system
+    assert request.prompt.dynamic_system[0].kind == "environment"
+    assert all("okcode-system-note" not in message.content for message in session.messages)
+
+
+@pytest.mark.asyncio
+async def test_plan_request_uses_task_mode_instruction_without_history_pollution() -> None:
+    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, "计划内容"))])
+    session = _session(provider)
+
+    _ = [event async for event in session.stream_turn("/plan 研究项目")]
+
+    request = provider.provider_requests[0]
+    task_instruction = next(
+        instruction
+        for instruction in request.prompt.dynamic_system
+        if instruction.kind == "task_mode"
+    )
+    assert "先通过只读工具" in task_instruction.content
+    assert request.prompt.dynamic_system[0].kind == "environment"
+    assert session.messages[0].content == "研究项目"
+    assert TurnKind.PLAN.value not in session.messages[0].content

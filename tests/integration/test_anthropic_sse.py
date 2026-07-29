@@ -12,12 +12,14 @@ from okcode.models import (
     ChatMessage,
     ProviderConfig,
     ProviderProtocol,
+    ProviderRequest,
     Role,
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
     ToolCall,
 )
+from okcode.prompt import PromptBuildContext, PromptBuilder, PromptCachePolicy, TurnKind
 from okcode.providers.anthropic import AnthropicProvider
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult
 from tests.helpers.sse import ChunkStream
@@ -83,7 +85,7 @@ class FakeAnthropicClient:
         self.close_count += 1
 
 
-def _config(*, thinking: bool = True) -> ProviderConfig:
+def _config(*, thinking: bool = True, prompt_cache: bool = False) -> ProviderConfig:
     return ProviderConfig(
         name="claude",
         protocol=ProviderProtocol.ANTHROPIC,
@@ -91,6 +93,7 @@ def _config(*, thinking: bool = True) -> ProviderConfig:
         base_url="https://api.anthropic.com",
         api_key="secret",
         thinking=thinking,
+        prompt_cache=prompt_cache,
     )
 
 
@@ -116,6 +119,31 @@ def _tool() -> ToolDefinition:
             "additionalProperties": False,
         },
         timeout_seconds=5,
+    )
+
+
+def _request(
+    messages: list[ChatMessage],
+    tools: list[ToolDefinition] | None = None,
+    *,
+    cache: bool = False,
+) -> ProviderRequest:
+    visible_tools = tuple(tools or ())
+    prompt = PromptBuilder().build(
+        PromptBuildContext(
+            workspace_root="D:/workspace",
+            platform="Windows",
+            current_date="2026-07-29",
+            available_tool_names=tuple(tool.name for tool in visible_tools),
+            turn_kind=TurnKind.NORMAL,
+        ),
+        visible_tools,
+    )
+    return ProviderRequest(
+        messages=tuple(messages),
+        tools=visible_tools,
+        prompt=prompt,
+        cache=PromptCachePolicy(enabled=cache),
     )
 
 
@@ -173,6 +201,80 @@ async def test_thinking_disabled_omits_parameter() -> None:
     provider = AnthropicProvider(_config(thinking=False), client=client)
     _ = await _collect(provider, [ChatMessage(Role.USER, "问题")])
     assert "thinking" not in client.messages.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_request_separates_system_blocks_and_cache_control() -> None:
+    stream = FakeAnthropicStream(
+        [SimpleNamespace(type="text", text="答案"), SimpleNamespace(type="message_stop")],
+        SimpleNamespace(stop_reason="end_turn", content=[FakeBlock("text", text="答案")]),
+    )
+    client = FakeAnthropicClient([stream])
+    provider = AnthropicProvider(_config(prompt_cache=True), client=client)
+    request_data = _request([ChatMessage(Role.USER, "解释文件")], [_tool()], cache=True)
+
+    _ = [event async for event in provider.stream(request_data)]
+
+    request = client.messages.calls[0]
+    system = request["system"]  # type: ignore[assignment]
+    assert system[0]["text"] == request_data.prompt.stable_system  # type: ignore[index]
+    assert system[0]["cache_control"]["type"] == "ephemeral"  # type: ignore[index]
+    assert "<okcode-system-note" in system[1]["text"]  # type: ignore[index]
+    assert "cache_control" not in system[1]  # type: ignore[operator]
+    assert request["tools"][0]["cache_control"]["type"] == "ephemeral"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cache_usage_is_reported_without_estimation() -> None:
+    stream = FakeAnthropicStream(
+        [
+            SimpleNamespace(
+                type="message_start",
+                usage=SimpleNamespace(
+                    input_tokens=20,
+                    output_tokens=0,
+                    cache_read_input_tokens=12,
+                    cache_creation_input_tokens=8,
+                ),
+            ),
+            SimpleNamespace(type="text", text="答案"),
+            SimpleNamespace(type="message_stop"),
+        ],
+        SimpleNamespace(stop_reason="end_turn", content=[FakeBlock("text", text="答案")]),
+    )
+    provider = AnthropicProvider(_config(), client=FakeAnthropicClient([stream]))
+
+    events = [event async for event in provider.stream(_request([ChatMessage(Role.USER, "问题")]))]
+
+    completed = events[-1]
+    assert isinstance(completed, StreamCompleted)
+    assert completed.usage.cache.read_tokens == 12
+    assert completed.usage.cache.write_tokens == 8
+    assert completed.usage.cache.available is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_missing_cache_usage_is_marked_unavailable() -> None:
+    stream = FakeAnthropicStream(
+        [
+            SimpleNamespace(
+                type="message_start",
+                usage=SimpleNamespace(input_tokens=20, output_tokens=0),
+            ),
+            SimpleNamespace(type="text", text="答案"),
+            SimpleNamespace(type="message_stop"),
+        ],
+        SimpleNamespace(stop_reason="end_turn", content=[FakeBlock("text", text="答案")]),
+    )
+    provider = AnthropicProvider(_config(), client=FakeAnthropicClient([stream]))
+
+    events = [event async for event in provider.stream(_request([ChatMessage(Role.USER, "问题")]))]
+
+    completed = events[-1]
+    assert isinstance(completed, StreamCompleted)
+    assert completed.usage.cache.available is False
+    assert completed.usage.cache.read_tokens is None
+    assert completed.usage.cache.write_tokens is None
 
 
 @pytest.mark.asyncio

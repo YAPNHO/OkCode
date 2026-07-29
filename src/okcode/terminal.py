@@ -174,16 +174,23 @@ class TerminalUI:
     def _render_token_usage(self, event: TokenUsageReported) -> None:
         self._finish_line()
         usage = event.usage
-        if not usage.available:
+        if not usage.available and not usage.cache.available:
             self._console.print(f"Token：第 {event.iteration} 轮用量不可用。", style="dim")
         else:
-            parts = []
+            parts: list[str] = []
             if usage.input_tokens is not None:
                 parts.append(f"输入 {usage.input_tokens}")
             if usage.output_tokens is not None:
                 parts.append(f"输出 {usage.output_tokens}")
             if usage.total_tokens is not None:
                 parts.append(f"总计 {usage.total_tokens}")
+            if usage.cache.available:
+                if usage.cache.read_tokens is not None:
+                    parts.append(f"缓存读取 {usage.cache.read_tokens}")
+                if usage.cache.write_tokens is not None:
+                    parts.append(f"缓存写入 {usage.cache.write_tokens}")
+            if not parts:
+                parts.append("用量不可用")
             summary = f"Token：第 {event.iteration} 轮，" + "，".join(parts) + "。"
             self._console.print(summary, style="dim")
         self._turn_open = True

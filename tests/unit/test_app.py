@@ -75,6 +75,21 @@ def test_provider_error_returns_to_prompt() -> None:
     assert ui.goodbyes == 1
 
 
+def test_app_only_renders_events_not_internal_prompt_data() -> None:
+    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, "完成"))])
+    ui = FakeTerminal(["执行任务", "/exit"])
+    runner = asyncio.Runner()
+    try:
+        assert OkCodeApp(ui, _conversation(provider), runner, _config()).run() == 0
+    finally:
+        runner.close()
+
+    rendered = repr(ui.deltas)
+    assert "okcode-system-note" not in rendered
+    assert "## 身份" not in rendered
+    assert "secret" not in rendered
+
+
 class InterruptRunner:
     def run(self, coroutine: object) -> object:
         close = getattr(coroutine, "close", None)

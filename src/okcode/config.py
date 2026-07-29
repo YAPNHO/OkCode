@@ -12,8 +12,8 @@ from okcode.errors import ConfigError
 from okcode.models import AppConfig, ProviderConfig, ProviderProtocol
 
 _ROOT_FIELDS = {"active", "providers"}
-_PROVIDER_FIELDS = {"name", "protocol", "model", "base_url", "api_key", "thinking"}
-_REQUIRED_PROVIDER_FIELDS = _PROVIDER_FIELDS - {"thinking"}
+_PROVIDER_FIELDS = {"name", "protocol", "model", "base_url", "api_key", "thinking", "prompt_cache"}
+_REQUIRED_PROVIDER_FIELDS = _PROVIDER_FIELDS - {"thinking", "prompt_cache"}
 
 
 def default_config_path() -> Path:
@@ -77,6 +77,10 @@ def _parse_provider(raw: object, index: int) -> ProviderConfig:
     if type(thinking) is not bool:
         raise ConfigError(f"{location}.thinking 必须是布尔值")
 
+    prompt_cache = item.get("prompt_cache", False)
+    if type(prompt_cache) is not bool:
+        raise ConfigError(f"{location}.prompt_cache 必须是布尔值")
+
     base_url = _nonempty_string(item.get("base_url"), f"{location}.base_url")
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -89,6 +93,7 @@ def _parse_provider(raw: object, index: int) -> ProviderConfig:
         base_url=base_url,
         api_key=_nonempty_string(item.get("api_key"), f"{location}.api_key"),
         thinking=thinking,
+        prompt_cache=prompt_cache,
     )
 
 

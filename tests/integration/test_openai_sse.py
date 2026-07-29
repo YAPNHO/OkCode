@@ -12,12 +12,14 @@ from okcode.models import (
     ChatMessage,
     ProviderConfig,
     ProviderProtocol,
+    ProviderRequest,
     Role,
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
     ToolCall,
 )
+from okcode.prompt import PromptBuildContext, PromptBuilder, PromptCachePolicy, TurnKind
 from okcode.providers.openai import OpenAIProvider
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult
 from tests.helpers.sse import ChunkStream, sse_event
@@ -67,7 +69,7 @@ class FakeOpenAIClient:
         self.close_count += 1
 
 
-def _config(*, thinking: bool = True) -> ProviderConfig:
+def _config(*, thinking: bool = True, prompt_cache: bool = False) -> ProviderConfig:
     return ProviderConfig(
         name="deepseek",
         protocol=ProviderProtocol.OPENAI,
@@ -75,6 +77,7 @@ def _config(*, thinking: bool = True) -> ProviderConfig:
         base_url="https://api.deepseek.com",
         api_key="OKCODE_SECRET_DO_NOT_PRINT_7429",
         thinking=thinking,
+        prompt_cache=prompt_cache,
     )
 
 
@@ -115,6 +118,31 @@ def _tool() -> ToolDefinition:
             "additionalProperties": False,
         },
         timeout_seconds=5,
+    )
+
+
+def _request(
+    messages: list[ChatMessage],
+    tools: list[ToolDefinition] | None = None,
+    *,
+    cache: bool = False,
+) -> ProviderRequest:
+    visible_tools = tuple(tools or ())
+    prompt = PromptBuilder().build(
+        PromptBuildContext(
+            workspace_root="D:/workspace",
+            platform="Windows",
+            current_date="2026-07-29",
+            available_tool_names=tuple(tool.name for tool in visible_tools),
+            turn_kind=TurnKind.NORMAL,
+        ),
+        visible_tools,
+    )
+    return ProviderRequest(
+        messages=tuple(messages),
+        tools=visible_tools,
+        prompt=prompt,
+        cache=PromptCachePolicy(enabled=cache),
     )
 
 
@@ -173,6 +201,90 @@ async def test_history_only_serializes_formal_content() -> None:
         {"role": "user", "content": "问题"},
         {"role": "assistant", "content": "答案"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_openai_request_separates_system_prompt_and_cache_key() -> None:
+    client = FakeOpenAIClient([FakeStream([_chunk(content="答案", finish="stop")])])
+    provider = OpenAIProvider(_config(prompt_cache=True), client=client)
+    request_data = _request([ChatMessage(Role.USER, "解释文件")], [_tool()], cache=True)
+
+    _ = [event async for event in provider.stream(request_data)]
+
+    request = client.completions.calls[0]
+    messages = request["messages"]  # type: ignore[assignment]
+    assert messages[0] == {"role": "system", "content": request_data.prompt.stable_system}
+    assert messages[1]["role"] == "system"  # type: ignore[index]
+    assert "<okcode-system-note" in messages[1]["content"]  # type: ignore[index]
+    assert messages[2] == {"role": "user", "content": "解释文件"}  # type: ignore[index]
+    assert request["prompt_cache_key"] == request_data.prompt.cache_key
+
+
+@pytest.mark.asyncio
+async def test_openai_without_prompt_cache_omits_cache_routing_fields() -> None:
+    client = FakeOpenAIClient([FakeStream([_chunk(content="答案", finish="stop")])])
+    provider = OpenAIProvider(_config(prompt_cache=False), client=client)
+
+    _ = [
+        event
+        async for event in provider.stream(
+            _request([ChatMessage(Role.USER, "解释文件")], [_tool()], cache=False)
+        )
+    ]
+
+    request = client.completions.calls[0]
+    assert "prompt_cache_key" not in request
+    assert "prompt_cache_retention" not in request
+
+
+@pytest.mark.asyncio
+async def test_openai_cache_usage_is_reported_without_estimation() -> None:
+    usage = SimpleNamespace(
+        prompt_tokens=20,
+        completion_tokens=3,
+        total_tokens=23,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=12),
+    )
+    stream = FakeStream(
+        [
+            SimpleNamespace(choices=[], usage=usage),
+            _chunk(content="答案", finish="stop"),
+        ]
+    )
+    provider = OpenAIProvider(_config(), client=FakeOpenAIClient([stream]))
+
+    events = [event async for event in provider.stream(_request([ChatMessage(Role.USER, "问题")]))]
+
+    completed = events[-1]
+    assert isinstance(completed, StreamCompleted)
+    assert completed.usage.cache.read_tokens == 12
+    assert completed.usage.cache.write_tokens is None
+    assert completed.usage.cache.available is True
+
+
+@pytest.mark.asyncio
+async def test_openai_missing_cache_usage_is_marked_unavailable() -> None:
+    usage = SimpleNamespace(
+        prompt_tokens=20,
+        completion_tokens=3,
+        total_tokens=23,
+        prompt_tokens_details=SimpleNamespace(),
+    )
+    stream = FakeStream(
+        [
+            SimpleNamespace(choices=[], usage=usage),
+            _chunk(content="答案", finish="stop"),
+        ]
+    )
+    provider = OpenAIProvider(_config(), client=FakeOpenAIClient([stream]))
+
+    events = [event async for event in provider.stream(_request([ChatMessage(Role.USER, "问题")]))]
+
+    completed = events[-1]
+    assert isinstance(completed, StreamCompleted)
+    assert completed.usage.cache.available is False
+    assert completed.usage.cache.read_tokens is None
+    assert completed.usage.cache.write_tokens is None
 
 
 @pytest.mark.asyncio
