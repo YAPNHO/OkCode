@@ -3,6 +3,7 @@ from __future__ import annotations
 from okcode import cli
 from okcode.errors import ConfigError
 from okcode.models import AppConfig, ProviderConfig, ProviderProtocol
+from okcode.permissions.models import PermissionConfirmation, PermissionRequest
 from okcode.providers.factory import create_provider
 
 
@@ -16,6 +17,9 @@ class StubUI:
 
     def show_startup_error(self) -> None:
         self.startup_errors += 1
+
+    def confirm_permission(self, _: PermissionRequest) -> PermissionConfirmation:
+        return PermissionConfirmation.DENY
 
 
 def _config() -> AppConfig:
@@ -108,3 +112,26 @@ def test_main_builds_default_tool_system_from_current_directory(monkeypatch, tmp
         "search_code",
         "write_file",
     ]
+
+
+def test_invalid_permission_rules_do_not_create_provider(monkeypatch, tmp_path) -> None:
+    ui = StubUI()
+    created = False
+    permissions = tmp_path / ".okcode"
+    permissions.mkdir()
+    (permissions / "permissions.yaml").write_text("rules: invalid\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "TerminalUI", lambda: ui)
+    monkeypatch.setattr(cli, "load_config", _config)
+
+    def unexpected(_: object) -> object:
+        nonlocal created
+        created = True
+        raise AssertionError("权限规则无效时不应创建 Provider")
+
+    monkeypatch.setattr(cli, "create_provider", unexpected)
+
+    assert cli.main() == 2
+    assert created is False
+    assert "permissions.yaml" in ui.config_errors[0]

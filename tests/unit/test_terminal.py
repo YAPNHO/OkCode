@@ -10,6 +10,7 @@ from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
+    PermissionStatus,
     TextDelta,
     ThinkingDelta,
     TokenUsage,
@@ -19,9 +20,10 @@ from okcode.models import (
     ToolExecutionFinished,
     ToolExecutionStarted,
 )
+from okcode.permissions.models import PermissionConfirmation, PermissionRequest
 from okcode.prompt import PromptCacheUsage
 from okcode.terminal import TerminalUI
-from okcode.tools.models import ToolErrorCode, ToolExecutionResult
+from okcode.tools.models import PermissionTargetKind, ToolErrorCode, ToolExecutionResult
 
 
 class StubSession:
@@ -145,3 +147,66 @@ def test_token_usage_shows_real_cache_fields_when_available() -> None:
     assert "输入 20" in text
     assert "缓存读取 12" in text
     assert "缓存写入 8" in text
+
+
+def _permission_request() -> PermissionRequest:
+    return PermissionRequest(
+        ToolCall("call", "run_command", "{}"),
+        object(),  # type: ignore[arg-type]
+        {"command": "git status"},
+        PermissionTargetKind.COMMAND,
+        "git status",
+        "git status",
+    )
+
+
+def test_permission_confirmation_maps_choices_and_safe_failures_to_deny() -> None:
+    choices = {
+        "o": PermissionConfirmation.ONCE,
+        "s": PermissionConfirmation.SESSION,
+        "p": PermissionConfirmation.PERMANENT,
+        "d": PermissionConfirmation.DENY,
+        "unexpected": PermissionConfirmation.DENY,
+    }
+    for value, expected in choices.items():
+        ui, _ = _ui([value])
+        assert ui.confirm_permission(_permission_request()) is expected
+
+    ui, _ = _ui([EOFError()])
+    assert ui.confirm_permission(_permission_request()) is PermissionConfirmation.DENY
+
+    ui, output = _ui(["d"])
+    _ = ui.confirm_permission(_permission_request())
+    assert "可能修改项目或影响系统" in _plain_text(output)
+
+
+def test_permission_status_and_denied_tool_are_rendered_without_full_data() -> None:
+    ui, output = _ui()
+    ui.render_event(
+        PermissionStatus(
+            "default",
+            "default",
+            "C:/user/.okcode/permissions.yaml",
+            "project/.okcode/permissions.yaml",
+            "project/.okcode/permissions.local.yaml",
+        )
+    )
+    ui.render_event(
+        ToolExecutionFinished(
+            ToolExecutionResult(
+                "call",
+                "run_command",
+                False,
+                "调用被权限规则拒绝。",
+                ToolErrorCode.PERMISSION_DENIED,
+                {"permission_source": "project", "executed": False, "secret": "不应显示"},
+            )
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "权限：当前 default，默认 default。" in text
+    assert "工具：run_command" in text
+    assert "未执行（project）" in text
+    assert "不应显示" not in text

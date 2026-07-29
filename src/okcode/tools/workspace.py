@@ -23,6 +23,11 @@ class Workspace:
     def resolve_path(self, raw_path: str, *, must_exist: bool) -> Path:
         """解析单个文件路径，并拒绝所有离开工作区的形式。"""
 
+        return self.resolve_path_with_relative(raw_path, must_exist=must_exist)[0]
+
+    def resolve_path_with_relative(self, raw_path: str, *, must_exist: bool) -> tuple[Path, str]:
+        """返回已解析的工作区路径及其稳定的项目相对显示形式。"""
+
         if not raw_path or raw_path.isspace():
             self._outside_workspace()
         candidate = Path(raw_path)
@@ -33,8 +38,10 @@ class Workspace:
             resolved = target.resolve(strict=must_exist)
         except FileNotFoundError as exc:
             raise ToolFailure(ToolErrorCode.NOT_FOUND, "目标文件或目录不存在。") from exc
+        except (OSError, RuntimeError) as exc:
+            raise ToolFailure(ToolErrorCode.IO_ERROR, "无法解析工作区中的目标路径。") from exc
         self._ensure_within(resolved)
-        return resolved
+        return resolved, resolved.relative_to(self._root).as_posix() or "."
 
     def resolve_directory(self, raw_path: str | None) -> Path:
         target = self._root if raw_path is None else self.resolve_path(raw_path, must_exist=True)
@@ -54,7 +61,7 @@ class Workspace:
 
     def relative_path(self, path: Path) -> str:
         resolved = self.ensure_candidate(path)
-        return resolved.relative_to(self._root).as_posix()
+        return resolved.relative_to(self._root).as_posix() or "."
 
     def _ensure_within(self, path: Path) -> None:
         try:

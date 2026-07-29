@@ -9,6 +9,7 @@ from okcode.app import OkCodeApp
 from okcode.config import load_config
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
+from okcode.permissions import PermissionManager, PermissionPaths, load_permission_rules
 from okcode.prompt import PromptCachePolicy
 from okcode.providers.factory import create_provider
 from okcode.terminal import TerminalUI
@@ -30,17 +31,31 @@ def main() -> int:
     runner = asyncio.Runner()
     provider = None
     try:
-        provider = create_provider(config.active_provider)
         workspace = Workspace(Path.cwd())
         registry = build_default_registry(workspace)
+        known_tool_names = {definition.name for definition in registry.definitions()}
+        paths = PermissionPaths.for_workspace(workspace.root)
+        rule_sets = load_permission_rules(paths, known_tool_names)
+        permissions = PermissionManager(
+            workspace,
+            rule_sets,
+            paths,
+            known_tool_names,
+            confirmer=ui.confirm_permission,
+        )
+        provider = create_provider(config.active_provider)
         conversation = ConversationSession(
             provider,
             registry,
-            ToolExecutor(registry),
+            ToolExecutor(registry, permissions=permissions),
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
+            permissions=permissions,
         )
         app = OkCodeApp(ui, conversation, runner, config.active_provider)
         return app.run()
+    except ConfigError as error:
+        ui.show_config_error(str(error))
+        return 2
     except Exception:
         ui.show_startup_error()
         return 1

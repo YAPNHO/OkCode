@@ -15,6 +15,7 @@ from okcode.models import (
     AgentStopped,
     AgentStopReason,
     ChatMessage,
+    PermissionStatus,
     ProviderRequest,
     Role,
     StreamCompleted,
@@ -25,6 +26,7 @@ from okcode.models import (
     ToolExecutionStarted,
     TurnEvent,
 )
+from okcode.permissions.manager import PermissionManager
 from okcode.prompt import (
     PromptBuildContext,
     PromptBuilder,
@@ -33,7 +35,7 @@ from okcode.prompt import (
     enhance_tool_definitions,
 )
 from okcode.providers.base import LLMProvider
-from okcode.tools.executor import ToolExecutor
+from okcode.tools.executor import PreparedToolCall, ToolExecutor
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult, ToolSafety
 from okcode.tools.registry import ToolRegistry
 
@@ -68,6 +70,7 @@ class ConversationSession:
         context_factory: Callable[[TurnKind, int, Sequence[ToolDefinition]], PromptBuildContext]
         | None = None,
         cache_policy: PromptCachePolicy | None = None,
+        permissions: PermissionManager | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -76,6 +79,7 @@ class ConversationSession:
         self._prompt_builder = prompt_builder or PromptBuilder()
         self._context_factory = context_factory or _default_context_factory
         self._cache_policy = cache_policy or PromptCachePolicy()
+        self._permissions = permissions
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
 
@@ -87,10 +91,20 @@ class ConversationSession:
     def saved_plan(self) -> SavedPlan | None:
         return self._saved_plan
 
+    @property
+    def permission_mode(self) -> str:
+        if self._permissions is None:
+            return "default"
+        return self._permissions.mode.value
+
     async def stream_turn(self, user_text: str) -> AsyncIterator[TurnEvent]:
         """流式执行一轮，并只在完整成功后提交历史。"""
 
         stripped = user_text.strip()
+        if stripped == "/permissions" or stripped.startswith("/permissions "):
+            async for event in self._handle_permissions_command(stripped):
+                yield event
+            return
         if stripped.startswith("/plan"):
             task = stripped.removeprefix("/plan").strip()
             if not task:
@@ -214,16 +228,29 @@ class ConversationSession:
         calls: Sequence[ToolCall],
     ) -> AsyncIterator[TurnEvent]:
         for batch in self._tool_batches(calls):
+            prepared: list[tuple[int, PreparedToolCall]] = []
+            results: dict[int, ToolExecutionResult] = {}
             for index, call in batch:
                 yield ToolCallRequested(call, index)
-                yield ToolExecutionStarted(call.name)
-            if len(batch) == 1:
-                result = await self._executor.execute(batch[0][1])
-                yield ToolExecutionFinished(result)
-            else:
-                results = await asyncio.gather(*(self._executor.execute(call) for _, call in batch))
-                for result in results:
-                    yield ToolExecutionFinished(result)
+                outcome = self._executor.prepare(call)
+                if isinstance(outcome, ToolExecutionResult):
+                    results[index] = outcome
+                else:
+                    prepared.append((index, outcome))
+            for _, item in prepared:
+                yield ToolExecutionStarted(item.call.name)
+            if len(prepared) == 1:
+                index, item = prepared[0]
+                results[index] = await self._executor.execute_prepared(item)
+            elif prepared:
+                executed = await asyncio.gather(
+                    *(self._executor.execute_prepared(item) for _, item in prepared)
+                )
+                results.update(
+                    {index: result for (index, _), result in zip(prepared, executed, strict=True)}
+                )
+            for index, _ in batch:
+                yield ToolExecutionFinished(results[index])
 
     def _tool_batches(
         self,
@@ -246,6 +273,36 @@ class ConversationSession:
     def _is_read_only(self, call: ToolCall) -> bool:
         tool = self._registry.get(call.name)
         return tool is not None and tool.definition.safety is ToolSafety.READ_ONLY
+
+    async def _handle_permissions_command(self, text: str) -> AsyncIterator[TurnEvent]:
+        if self._permissions is None:
+            yield AgentStopped(AgentStopReason.NO_SAVED_PLAN, "当前会话未启用权限系统。")
+            return
+        parts = text.split()
+        if len(parts) == 1:
+            yield self._permission_status()
+            return
+        if len(parts) == 2:
+            try:
+                self._permissions.set_mode(parts[1])
+            except ValueError:
+                yield self._permission_status("权限模式只能是 strict、default 或 allow。")
+                return
+            yield self._permission_status("权限模式已更新。")
+            return
+        yield self._permission_status("用法：/permissions [strict|default|allow]")
+
+    def _permission_status(self, message: str | None = None) -> PermissionStatus:
+        assert self._permissions is not None
+        paths = self._permissions.paths
+        return PermissionStatus(
+            self.permission_mode,
+            "default",
+            str(paths.user),
+            str(paths.project),
+            str(paths.project_local),
+            message,
+        )
 
 
 def _default_context_factory(

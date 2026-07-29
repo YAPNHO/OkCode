@@ -9,6 +9,8 @@ from pathlib import Path
 
 from okcode.tools.models import (
     JSONValue,
+    PermissionTarget,
+    PermissionTargetKind,
     ToolDefinition,
     ToolErrorCode,
     ToolFailure,
@@ -40,6 +42,7 @@ class ReadFileTool:
             input_schema=_object_schema({"path": {"type": "string", "minLength": 1}}, ["path"]),
             timeout_seconds=timeout_seconds,
             safety=ToolSafety.READ_ONLY,
+            permission_target=PermissionTarget(PermissionTargetKind.PATH, "path"),
         )
 
     @property
@@ -85,6 +88,7 @@ class WriteFileTool:
             ),
             timeout_seconds=timeout_seconds,
             safety=ToolSafety.SIDE_EFFECT,
+            permission_target=PermissionTarget(PermissionTargetKind.PATH, "path"),
         )
 
     @property
@@ -129,6 +133,7 @@ class EditFileTool:
             ),
             timeout_seconds=timeout_seconds,
             safety=ToolSafety.SIDE_EFFECT,
+            permission_target=PermissionTarget(PermissionTargetKind.PATH, "path"),
         )
 
     @property

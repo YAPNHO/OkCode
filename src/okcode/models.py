@@ -203,6 +203,18 @@ class ToolExecutionFinished:
     result: ToolExecutionResult
 
 
+@dataclass(frozen=True, slots=True)
+class PermissionStatus:
+    """当前会话权限模式及规则文件位置。"""
+
+    current_mode: str
+    default_mode: str
+    user_rules_path: str
+    project_rules_path: str
+    local_rules_path: str
+    message: str | None = None
+
+
 type VisibleDelta = ThinkingDelta | TextDelta
 type StreamEvent = ThinkingDelta | TextDelta | StreamCompleted
 type TurnEvent = (
@@ -214,4 +226,5 @@ type TurnEvent = (
     | ToolExecutionFinished
     | TokenUsageReported
     | AgentStopped
+    | PermissionStatus
 )

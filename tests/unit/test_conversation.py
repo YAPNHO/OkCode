@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -21,10 +22,15 @@ from okcode.models import (
     ToolExecutionFinished,
     ToolExecutionStarted,
 )
+from okcode.permissions.manager import PermissionManager
+from okcode.permissions.models import PermissionConfirmation, PermissionMode
+from okcode.permissions.rules import PermissionPaths
 from okcode.prompt import TurnKind
 from okcode.tools.executor import ToolExecutor
 from okcode.tools.models import (
     JSONValue,
+    PermissionTarget,
+    PermissionTargetKind,
     ToolDefinition,
     ToolErrorCode,
     ToolFailure,
@@ -32,6 +38,7 @@ from okcode.tools.models import (
     ToolSafety,
 )
 from okcode.tools.registry import ToolRegistry
+from okcode.tools.workspace import Workspace
 from tests.fakes import FakeProvider
 
 
@@ -89,6 +96,31 @@ class ControlledTool:
             return ToolOutput("工具成功", {"value": "ok", "tool": self.name})
         finally:
             self.active -= 1
+
+
+class ControlledCommandTool:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._definition = ToolDefinition(
+            name="run_command",
+            description="受控命令工具",
+            input_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            timeout_seconds=1,
+            permission_target=PermissionTarget(PermissionTargetKind.COMMAND, "command"),
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return self._definition
+
+    async def execute(self, arguments: dict[str, JSONValue]) -> ToolOutput:
+        self.calls += 1
+        return ToolOutput("命令成功", {"command": arguments["command"]})
 
 
 @pytest.mark.asyncio
@@ -358,3 +390,89 @@ async def test_plan_request_uses_task_mode_instruction_without_history_pollution
     assert request.prompt.dynamic_system[0].kind == "environment"
     assert session.messages[0].content == "研究项目"
     assert TurnKind.PLAN.value not in session.messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_permission_denial_is_returned_to_model_and_agent_loop_continues(
+    tmp_path: Path,
+) -> None:
+    tool = ControlledCommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    paths = PermissionPaths(
+        user=tmp_path / "user.yaml",
+        project=tmp_path / ".okcode" / "permissions.yaml",
+        project_local=tmp_path / ".okcode" / "permissions.local.yaml",
+    )
+    permissions = PermissionManager(
+        Workspace(tmp_path),
+        (),
+        paths,
+        {"run_command"},
+        mode=PermissionMode.DEFAULT,
+        confirmer=lambda _: PermissionConfirmation.ONCE,
+    )
+    denied_call = ToolCall("denied", "run_command", '{"command":"shutdown /r /t 0"}')
+    safe_call = ToolCall("safe", "run_command", '{"command":"git status"}')
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=denied_call))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=safe_call))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "已改用安全命令。"))],
+        ]
+    )
+    session = ConversationSession(
+        provider,
+        registry,
+        ToolExecutor(registry, permissions=permissions),
+        permissions=permissions,
+    )
+
+    events = [event async for event in session.stream_turn("检查项目")]
+
+    finished = [event.result for event in events if isinstance(event, ToolExecutionFinished)]
+    assert finished[0].error_code is ToolErrorCode.PERMISSION_DENIED
+    assert finished[0].data["permission_source"] == "blacklist"
+    assert finished[1].success is True
+    assert tool.calls == 1
+    assert len(provider.requests) == 3
+    first_result_message = provider.requests[1][-1]
+    assert first_result_message.role is Role.TOOL
+    assert first_result_message.tool_result is not None
+    assert first_result_message.tool_result.error_code is ToolErrorCode.PERMISSION_DENIED
+    assert [message.role for message in session.messages] == [
+        Role.USER,
+        Role.ASSISTANT,
+        Role.TOOL,
+        Role.ASSISTANT,
+        Role.TOOL,
+        Role.ASSISTANT,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_permissions_command_does_not_call_provider_or_change_history(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    registry = ToolRegistry()
+    paths = PermissionPaths(
+        user=tmp_path / "user.yaml",
+        project=tmp_path / ".okcode" / "permissions.yaml",
+        project_local=tmp_path / ".okcode" / "permissions.local.yaml",
+    )
+    permissions = PermissionManager(Workspace(tmp_path), (), paths, set())
+    session = ConversationSession(
+        provider,
+        registry,
+        ToolExecutor(registry, permissions=permissions),
+        permissions=permissions,
+    )
+
+    status_events = [event async for event in session.stream_turn("/permissions strict")]
+    invalid_events = [event async for event in session.stream_turn("/permissions unsafe")]
+
+    assert provider.requests == []
+    assert session.messages == ()
+    assert session.permission_mode == "strict"
+    assert status_events[0].current_mode == "strict"
+    assert invalid_events[0].current_mode == "strict"
+    assert invalid_events[0].message == "权限模式只能是 strict、default 或 allow。"

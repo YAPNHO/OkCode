@@ -6,6 +6,8 @@ __pycache__/
 .coverage
 coverage.xml
 dist/
-.okcode/
+.okcode/*
+!.okcode/
+!.okcode/permissions.yaml
 config.yaml
 *.egg-info/

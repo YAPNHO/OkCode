@@ -44,3 +44,12 @@ def test_workspace_rejects_symlink_to_outside_root(tmp_path: Path) -> None:
     with pytest.raises(ToolFailure) as raised:
         Workspace(tmp_path).resolve_path("outside-link.txt", must_exist=True)
     assert raised.value.code is ToolErrorCode.OUTSIDE_WORKSPACE
+
+
+def test_workspace_normalizes_windows_style_relative_paths(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+
+    resolved, relative = workspace.resolve_path_with_relative("nested\\new.txt", must_exist=False)
+
+    assert resolved == tmp_path / "nested" / "new.txt"
+    assert relative == "nested/new.txt"

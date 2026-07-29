@@ -22,6 +22,7 @@ class ToolErrorCode(StrEnum):
     MATCH_NOT_FOUND = "match_not_found"
     MATCH_NOT_UNIQUE = "match_not_unique"
     COMMAND_FAILED = "command_failed"
+    PERMISSION_DENIED = "permission_denied"
     TIMEOUT = "timeout"
     INTERNAL_ERROR = "internal_error"
 
@@ -33,6 +34,23 @@ class ToolSafety(StrEnum):
     SIDE_EFFECT = "side_effect"
 
 
+class PermissionTargetKind(StrEnum):
+    """权限规则匹配的工具主操作目标类别。"""
+
+    NONE = "none"
+    COMMAND = "command"
+    PATH = "path"
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionTarget:
+    """工具主操作参数的权限匹配说明。"""
+
+    kind: PermissionTargetKind = PermissionTargetKind.NONE
+    argument_name: str | None = None
+    optional: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     """供模型声明和运行时校验共用的工具元信息。"""
@@ -42,6 +60,7 @@ class ToolDefinition:
     input_schema: Mapping[str, JSONValue]
     timeout_seconds: float
     safety: ToolSafety = ToolSafety.SIDE_EFFECT
+    permission_target: PermissionTarget = field(default_factory=PermissionTarget)
 
 
 @dataclass(frozen=True, slots=True)

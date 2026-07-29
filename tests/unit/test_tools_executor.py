@@ -6,9 +6,21 @@ from collections.abc import Mapping
 import pytest
 
 from okcode.models import ToolCall
+from okcode.permissions.manager import PermissionManager
+from okcode.permissions.models import PermissionMode
+from okcode.permissions.rules import PermissionPaths
 from okcode.tools.executor import ToolExecutor
-from okcode.tools.models import JSONValue, ToolDefinition, ToolErrorCode, ToolFailure, ToolOutput
+from okcode.tools.models import (
+    JSONValue,
+    PermissionTarget,
+    PermissionTargetKind,
+    ToolDefinition,
+    ToolErrorCode,
+    ToolFailure,
+    ToolOutput,
+)
 from okcode.tools.registry import ToolRegistry
+from okcode.tools.workspace import Workspace
 
 
 class ControlledTool:
@@ -40,6 +52,31 @@ class ControlledTool:
         if self._behavior == "large":
             return ToolOutput("x" * 100, {"payload": "y" * 100})
         return ToolOutput("成功", {"value": arguments["value"]})
+
+
+class CommandTool:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._definition = ToolDefinition(
+            name="run_command",
+            description="受控命令工具",
+            input_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            timeout_seconds=1,
+            permission_target=PermissionTarget(PermissionTargetKind.COMMAND, "command"),
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return self._definition
+
+    async def execute(self, arguments: Mapping[str, JSONValue]) -> ToolOutput:
+        self.calls += 1
+        return ToolOutput("命令成功", {"command": arguments["command"]})
 
 
 def _executor(tool: ControlledTool, **limits: int) -> ToolExecutor:
@@ -85,3 +122,32 @@ async def test_executor_handles_timeout_internal_error_and_truncation() -> None:
     assert large.truncated is True
     assert "输出已截断" in large.content
     assert large.data["data_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_permission_rejection_happens_before_command_tool_execution(tmp_path) -> None:
+    tool = CommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    paths = PermissionPaths(
+        user=tmp_path / "user.yaml",
+        project=tmp_path / ".okcode" / "permissions.yaml",
+        project_local=tmp_path / ".okcode" / "permissions.local.yaml",
+    )
+    permissions = PermissionManager(
+        Workspace(tmp_path),
+        (),
+        paths,
+        {"run_command"},
+        mode=PermissionMode.ALLOW,
+    )
+    executor = ToolExecutor(registry, permissions=permissions)
+
+    result = await executor.execute(
+        ToolCall("call", "run_command", '{"command":"shutdown /r /t 0"}')
+    )
+
+    assert result.error_code is ToolErrorCode.PERMISSION_DENIED
+    assert result.data["permission_source"] == "blacklist"
+    assert result.data["executed"] is False
+    assert tool.calls == 0

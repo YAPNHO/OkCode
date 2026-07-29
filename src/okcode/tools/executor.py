@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator, ValidationError
 
 from okcode.models import ToolCall
+from okcode.permissions.manager import PermissionManager
+from okcode.tools.base import Tool
 from okcode.tools.models import (
     JSONValue,
     ToolErrorCode,
@@ -23,6 +26,15 @@ _DATA_LIMIT = 16_000
 _TRUNCATION_NOTICE = "\n[输出已截断]"
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedToolCall:
+    """已通过参数校验和权限预检、可以安全开始执行的工具调用。"""
+
+    call: ToolCall
+    tool: Tool
+    arguments: Mapping[str, JSONValue]
+
+
 class ToolExecutor:
     """工具执行的唯一入口，任何失败都转为结果而非异常。"""
 
@@ -30,14 +42,24 @@ class ToolExecutor:
         self,
         registry: ToolRegistry,
         *,
+        permissions: PermissionManager | None = None,
         content_limit: int = _CONTENT_LIMIT,
         data_limit: int = _DATA_LIMIT,
     ) -> None:
         self._registry = registry
+        self._permissions = permissions
         self._content_limit = content_limit
         self._data_limit = data_limit
 
     async def execute(self, call: ToolCall) -> ToolExecutionResult:
+        prepared = self.prepare(call)
+        if isinstance(prepared, ToolExecutionResult):
+            return prepared
+        return await self.execute_prepared(prepared)
+
+    def prepare(self, call: ToolCall) -> PreparedToolCall | ToolExecutionResult:
+        """完成参数和权限检查，但不启动实际工具。"""
+
         tool = self._registry.get(call.name)
         if tool is None:
             return self._failure(
@@ -45,7 +67,6 @@ class ToolExecutor:
                 ToolErrorCode.UNKNOWN_TOOL,
                 f"不存在名为 {call.name!r} 的工具。",
             )
-
         try:
             arguments = json.loads(call.arguments_json)
         except json.JSONDecodeError:
@@ -62,6 +83,28 @@ class ToolExecutor:
                 ToolErrorCode.INVALID_ARGUMENTS,
                 f"工具参数无效：{location} {error.message}",
             )
+
+        if self._permissions is not None:
+            decision = self._permissions.authorize(call, tool.definition, arguments)
+            if not decision.allowed:
+                return self._failure(
+                    call,
+                    decision.error_code,
+                    decision.reason + " 调用未执行，请调整参数或改用其他方案。",
+                    {
+                        "permission_source": decision.source.value,
+                        "permission_reason": decision.reason,
+                        "executed": False,
+                    },
+                )
+        return PreparedToolCall(call, tool, arguments)
+
+    async def execute_prepared(self, prepared: PreparedToolCall) -> ToolExecutionResult:
+        """执行已经通过预检的调用，并沿用原有失败与输出边界。"""
+
+        call = prepared.call
+        tool = prepared.tool
+        arguments = prepared.arguments
 
         try:
             output = await asyncio.wait_for(

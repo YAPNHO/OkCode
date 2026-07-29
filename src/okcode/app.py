@@ -26,7 +26,7 @@ class OkCodeApp:
         self._config = config
 
     def run(self) -> int:
-        self._ui.show_welcome(self._config)
+        self._ui.show_welcome(self._config, self._conversation.permission_mode)
         while True:
             text = self._ui.prompt()
             if text is None or text.strip() == "/exit":

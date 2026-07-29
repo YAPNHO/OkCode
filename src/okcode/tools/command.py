@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from okcode.tools.files import _object_schema
 from okcode.tools.models import (
     JSONValue,
+    PermissionTarget,
+    PermissionTargetKind,
     ToolDefinition,
     ToolErrorCode,
     ToolFailure,
@@ -35,6 +37,7 @@ class RunCommandTool:
             ),
             timeout_seconds=timeout_seconds,
             safety=ToolSafety.SIDE_EFFECT,
+            permission_target=PermissionTarget(PermissionTargetKind.COMMAND, "command"),
         )
 
     @property

@@ -61,8 +61,8 @@ class FakeTerminal:
     def prompt(self) -> str | None:
         return next(self._prompts)
 
-    def show_welcome(self, config: object) -> None:
-        self.welcome.append(config)
+    def show_welcome(self, config: object, permission_mode: str = "default") -> None:
+        self.welcome.append((config, permission_mode))
 
     def render_delta(self, event: object) -> None:
         self.deltas.append(event)

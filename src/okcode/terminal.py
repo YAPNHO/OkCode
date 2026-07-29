@@ -13,6 +13,7 @@ from okcode.errors import ProviderError
 from okcode.models import (
     AgentProgress,
     AgentStopped,
+    PermissionStatus,
     ProviderConfig,
     TextDelta,
     ThinkingDelta,
@@ -23,6 +24,8 @@ from okcode.models import (
     TurnEvent,
     VisibleDelta,
 )
+from okcode.permissions.models import PermissionConfirmation, PermissionRequest
+from okcode.tools.models import ToolErrorCode
 
 
 class TerminalUI:
@@ -51,8 +54,33 @@ class TerminalUI:
             except EOFError:
                 return None
 
-    def show_welcome(self, config: ProviderConfig) -> None:
-        self._console.print(f"OkCode | {config.name} | {config.protocol} | {config.model}")
+    def show_welcome(self, config: ProviderConfig, permission_mode: str = "default") -> None:
+        self._console.print(
+            f"OkCode | {config.name} | {config.protocol} | {config.model} | 权限：{permission_mode}"
+        )
+
+    def confirm_permission(self, request: PermissionRequest) -> PermissionConfirmation:
+        """在默认权限模式下读取一次明确的用户决定。"""
+
+        target = request.display_target or "无主操作目标"
+        self._console.print(f"权限确认：{request.call.name} -> {target}", style="yellow")
+        self._console.print("此操作可能修改项目或影响系统，请确认是否允许。", style="yellow")
+        self._console.print("选择：d=拒绝，o=仅本次，s=本会话，p=永久允许", style="dim")
+        try:
+            session = self._session
+            if session is None:
+                session = PromptSession(history=InMemoryHistory())
+                self._session = session
+            choice = session.prompt("权限 > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return PermissionConfirmation.DENY
+        choices = {
+            "o": PermissionConfirmation.ONCE,
+            "s": PermissionConfirmation.SESSION,
+            "p": PermissionConfirmation.PERMANENT,
+            "d": PermissionConfirmation.DENY,
+        }
+        return choices.get(choice, PermissionConfirmation.DENY)
 
     def render_delta(self, event: VisibleDelta) -> None:
         if isinstance(event, ThinkingDelta):
@@ -79,6 +107,8 @@ class TerminalUI:
             self._render_token_usage(event)
         elif isinstance(event, AgentStopped):
             self._render_agent_stopped(event)
+        elif isinstance(event, PermissionStatus):
+            self._render_permission_status(event)
 
     def finish_turn(self) -> None:
         thinking_closed = self._close_thinking_section()
@@ -164,6 +194,14 @@ class TerminalUI:
 
     def _render_tool_finished(self, event: ToolExecutionFinished) -> None:
         result = event.result
+        if result.error_code is ToolErrorCode.PERMISSION_DENIED or not result.data.get(
+            "executed", True
+        ):
+            source = result.data.get("permission_source", "权限系统")
+            self._finish_line()
+            self._console.print(f"工具：{result.tool_name} 未执行（{source}）。{result.content}")
+            self._turn_open = True
+            return
         status = "完成" if result.success else "失败"
         summary = " ".join(result.content.split())
         if len(summary) > 160:
@@ -198,6 +236,18 @@ class TerminalUI:
     def _render_agent_stopped(self, event: AgentStopped) -> None:
         self._finish_line()
         self._console.print(f"停止：{event.message}", style="yellow")
+        self._turn_open = True
+
+    def _render_permission_status(self, event: PermissionStatus) -> None:
+        self._finish_line()
+        self._console.print(
+            f"权限：当前 {event.current_mode}，默认 {event.default_mode}。", style="dim"
+        )
+        self._console.print(f"用户规则：{event.user_rules_path}", style="dim")
+        self._console.print(f"项目规则：{event.project_rules_path}", style="dim")
+        self._console.print(f"本地规则：{event.local_rules_path}", style="dim")
+        if event.message:
+            self._console.print(f"权限：{event.message}", style="yellow")
         self._turn_open = True
 
     def _close_thinking_section(self) -> bool:
