@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 from okcode.models import ChatMessage, ProviderRequest, StreamEvent
+from okcode.sessions import SessionDescriptor
 from okcode.tools.models import ToolDefinition
 
 
@@ -49,20 +50,31 @@ class FakeProvider:
 
 
 class FakeTerminal:
-    def __init__(self, prompts: list[str | None]) -> None:
+    def __init__(
+        self,
+        prompts: list[str | None],
+        resume_choices: list[str | None] | None = None,
+    ) -> None:
         self._prompts = iter(prompts)
+        self._resume_choices = iter(resume_choices or [])
         self.welcome = []
         self.deltas = []
         self.errors = []
+        self.runtime_errors = []
         self.cancelled = 0
         self.finished = 0
         self.goodbyes = 0
+        self.resumable_sessions: list[tuple[SessionDescriptor, ...]] = []
 
     def prompt(self) -> str | None:
         return next(self._prompts)
 
     def show_welcome(self, config: object, permission_mode: str = "default") -> None:
         self.welcome.append((config, permission_mode))
+
+    def select_session(self, sessions: Sequence[SessionDescriptor]) -> str | None:
+        self.resumable_sessions.append(tuple(sessions))
+        return next(self._resume_choices, None)
 
     def render_delta(self, event: object) -> None:
         self.deltas.append(event)
@@ -75,6 +87,9 @@ class FakeTerminal:
 
     def show_error(self, error: object) -> None:
         self.errors.append(error)
+
+    def show_runtime_error(self, error: object) -> None:
+        self.runtime_errors.append(error)
 
     def show_cancelled(self) -> None:
         self.cancelled += 1

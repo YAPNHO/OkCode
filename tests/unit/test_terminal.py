@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from io import StringIO
 
 from rich.console import Console
@@ -23,6 +24,7 @@ from okcode.models import (
 )
 from okcode.permissions.models import PermissionConfirmation, PermissionRequest
 from okcode.prompt import PromptCacheUsage
+from okcode.sessions import SessionDescriptor
 from okcode.terminal import TerminalUI
 from okcode.tools.models import PermissionTargetKind, ToolErrorCode, ToolExecutionResult
 
@@ -41,9 +43,13 @@ class StubSession:
         return self.prompt(prompt)
 
 
-def _ui(values: list[object] | None = None) -> tuple[TerminalUI, StringIO]:
+def _ui(
+    values: list[object] | None = None,
+    *,
+    width: int = 40,
+) -> tuple[TerminalUI, StringIO]:
     output = StringIO()
-    console = Console(file=output, force_terminal=True, color_system="standard", width=40)
+    console = Console(file=output, force_terminal=True, color_system="standard", width=width)
     return TerminalUI(console=console, session=StubSession(values or [])), output
 
 
@@ -86,11 +92,55 @@ def test_prompt_retries_after_interrupt_and_eof_exits() -> None:
     assert ui.prompt() is None
 
 
+def _session_descriptor(title: str = "\u4fee\u590d\u4f1a\u8bdd") -> SessionDescriptor:
+    return SessionDescriptor(
+        "20260730-100000-abcd",
+        title,
+        4,
+        datetime(2026, 7, 30, 10, tzinfo=UTC),
+    )
+
+
+def test_session_selector_displays_table_and_retries_until_valid_number() -> None:
+    ui, output = _ui(["invalid", "3", "1"], width=120)
+    selected = ui.select_session(
+        (_session_descriptor(), _session_descriptor("\u53e6\u4e00\u4e2a\u4f1a\u8bdd"))
+    )
+
+    assert selected == "20260730-100000-abcd"
+    text = _plain_text(output)
+    assert "\u53ef\u6062\u590d\u4f1a\u8bdd" in text
+    assert "\u4f1a\u8bdd ID" in text
+    assert "\u4fee\u590d\u4f1a\u8bdd" in text
+    assert "\u8bf7\u8f93\u5165\u4f1a\u8bdd\u7f16\u53f7" in text
+    assert "\u4f1a\u8bdd\u7f16\u53f7\u4e0d\u5b58\u5728" in text
+
+
+def test_session_selector_handles_empty_list_and_cancellation() -> None:
+    ui, output = _ui()
+    assert ui.select_session(()) is None
+    assert "\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4f1a\u8bdd\u3002" in _plain_text(output)
+
+    cancelled_ui, cancelled_output = _ui(["/cancel"])
+    assert cancelled_ui.select_session((_session_descriptor(),)) is None
+    assert "\u5df2\u53d6\u6d88\u6062\u590d\u3002" in _plain_text(cancelled_output)
+
+
 def test_error_hides_raw_secret() -> None:
     ui, output = _ui()
     ui.show_error(ProviderError(ProviderErrorKind.BAD_REQUEST, "安全消息", status_code=400))
     assert "安全消息" in output.getvalue()
     assert "OKCODE_SECRET_DO_NOT_PRINT_7429" not in output.getvalue()
+
+
+def test_runtime_error_closes_open_line_and_shows_exception_type() -> None:
+    ui, output = _ui()
+    ui.render_event(AgentProgress("模型请求 1", 1))
+    ui.show_runtime_error(ValueError("运行期异常"))
+
+    text = _plain_text(output)
+    assert "进度：模型请求 1" in text
+    assert "运行错误：ValueError: 运行期异常" in text
 
 
 def test_mcp_warning_shows_only_safe_server_diagnostic() -> None:
@@ -125,7 +175,7 @@ def test_tool_events_show_short_status_without_full_json() -> None:
 
 def test_agent_events_show_progress_usage_and_stop_message() -> None:
     ui, output = _ui()
-    ui.render_event(AgentProgress("模型迭代 1/12", 1))
+    ui.render_event(AgentProgress("模型请求 1", 1))
     ui.render_event(ToolCallRequested(ToolCall("call", "read_file", "{}"), 0))
     ui.render_event(TokenUsageReported(TokenUsage.unavailable(), 1))
     ui.render_event(
@@ -134,7 +184,7 @@ def test_agent_events_show_progress_usage_and_stop_message() -> None:
     ui.finish_turn()
 
     text = _plain_text(output)
-    assert "进度：模型迭代 1/12" in text
+    assert "进度：模型请求 1" in text
     assert "模型请求 read_file" in text
     assert "Token：第 1 轮用量不可用。" in text
     assert "停止：没有可执行的计划" in text

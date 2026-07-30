@@ -181,6 +181,8 @@ class AgentStopReason(StrEnum):
     UNKNOWN_TOOL_LIMIT = "unknown_tool_limit"
     CONTEXT_COMPACTION_FAILED = "context_compaction_failed"
     CONTEXT_SUMMARY_CIRCUIT_OPEN = "context_summary_circuit_open"
+    SESSION_ARCHIVE_FAILED = "session_archive_failed"
+    SESSION_RESTORE_FAILED = "session_restore_failed"
 
 
 @dataclass(frozen=True, slots=True)

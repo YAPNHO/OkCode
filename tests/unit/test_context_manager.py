@@ -100,3 +100,27 @@ def test_success_resets_failures_and_third_failure_opens_circuit(tmp_path: Path)
     assert manager.record_summary_failure() is True
     assert manager.circuit_open is True
     assert manager.plan_compaction(history, (), force=True) is None
+
+
+def test_restore_history_rebuilds_user_messages_and_clears_process_state(tmp_path: Path) -> None:
+    manager = ContextManager(ArtifactStore(tmp_path, "restore"))
+    request = _request("旧请求")
+    manager.record_user_message("旧请求")
+    manager.record_normal_usage(request, TokenUsage(input_tokens=100))
+    manager.state.summary = "旧摘要"
+    manager.state.boundary_message = "旧边界"
+    manager.record_summary_failure()
+
+    manager.restore_history(
+        (
+            ChatMessage(Role.USER, "恢复的用户消息"),
+            ChatMessage(Role.ASSISTANT, "恢复的回答"),
+        )
+    )
+
+    assert manager.state.original_user_messages == ("恢复的用户消息",)
+    assert manager.state.summary is None
+    assert manager.state.boundary_message is None
+    assert manager.state.estimate_anchor is None
+    assert manager.state.consecutive_summary_failures == 0
+    assert manager.circuit_open is False

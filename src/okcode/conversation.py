@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import platform as host_platform
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from okcode.context import ContextManager, SummaryPlan, SummaryRequestFactory
 from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.memory.models import MemoryJob
+from okcode.memory.worker import MemoryWorker
 from okcode.models import (
     AgentProgress,
     AgentStopped,
@@ -32,10 +35,12 @@ from okcode.prompt import (
     PromptBuildContext,
     PromptBuilder,
     PromptCachePolicy,
+    SystemInstruction,
     TurnKind,
     enhance_tool_definitions,
 )
 from okcode.providers.base import LLMProvider
+from okcode.sessions import SessionDescriptor, SessionJournal, SessionStore
 from okcode.tools.executor import PreparedToolCall, ToolExecutor
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult, ToolSafety
 from okcode.tools.registry import ToolRegistry
@@ -45,6 +50,7 @@ from okcode.tools.registry import ToolRegistry
 class AgentConfig:
     """Agent Loop 的安全兜底参数。"""
 
+    # 单轮用户请求中，模型自主请求工具并回到模型的循环上限；不是用户对话轮数上限。
     max_iterations: int = 12
     unknown_tool_limit: int = 2
 
@@ -74,6 +80,9 @@ class ConversationSession:
         permissions: PermissionManager | None = None,
         context_manager: ContextManager | None = None,
         summary_factory: SummaryRequestFactory | None = None,
+        session_journal: SessionJournal | None = None,
+        session_store: SessionStore | None = None,
+        memory_worker: MemoryWorker | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -85,8 +94,12 @@ class ConversationSession:
         self._permissions = permissions
         self._context_manager = context_manager
         self._summary_factory = summary_factory or SummaryRequestFactory()
+        self._session_journal = session_journal
+        self._session_store = session_store
+        self._memory_worker = memory_worker
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
+        self._resumption_notice: str | None = None
 
     @property
     def messages(self) -> tuple[ChatMessage, ...]:
@@ -101,6 +114,64 @@ class ConversationSession:
         if self._permissions is None:
             return "default"
         return self._permissions.mode.value
+
+    def list_resumable_sessions(self) -> tuple[SessionDescriptor, ...]:
+        """返回当前项目可由 `/resume` 选择的会话摘要。"""
+
+        if self._session_store is None:
+            return ()
+        return self._session_store.list_resumable()
+
+    async def restore_session(self, session_id: str) -> AsyncIterator[TurnEvent]:
+        """恢复一个历史会话，并在必要时先压缩一次历史。"""
+
+        if self._session_store is None:
+            yield AgentStopped(AgentStopReason.SESSION_RESTORE_FAILED, "当前会话未启用会话恢复。")
+            return
+        yield AgentProgress("正在恢复会话历史。")
+        try:
+            recovered = self._session_store.restore(session_id)
+            journal = self._session_store.journal_for(session_id)
+        except ValueError as exc:
+            yield AgentStopped(AgentStopReason.SESSION_RESTORE_FAILED, str(exc))
+            return
+        if recovered.skipped_lines:
+            yield AgentProgress(f"恢复时已跳过 {recovered.skipped_lines} 条损坏记录。")
+        if recovered.was_truncated:
+            yield AgentProgress("检测到不完整工具调用，已截断到最后一个合法消息边界。")
+
+        previous_messages = self._messages
+        previous_journal = self._session_journal
+        previous_notice = self._resumption_notice
+        previous_state = None
+        if self._context_manager is not None:
+            previous_state = copy.deepcopy(self._context_manager.state)
+            self._context_manager.restore_history(recovered.messages)
+        self._messages = recovered.messages
+        self._session_journal = journal
+        self._resumption_notice = self._gap_notice(recovered.updated_at)
+
+        request = self._build_normal_request(
+            (),
+            self._registry.definitions(),
+            TurnKind.NORMAL,
+            1,
+            include_resumption_notice=False,
+        )
+        if self._context_manager is not None and self._context_manager.needs_automatic_compaction(
+            request
+        ):
+            yield AgentProgress("恢复历史接近上下文窗口，正在压缩。")
+            stopped = await self._compact_recovered_history()
+            if stopped is not None:
+                self._messages = previous_messages
+                self._session_journal = previous_journal
+                self._resumption_notice = previous_notice
+                assert previous_state is not None
+                self._context_manager.state = previous_state
+                yield stopped
+                return
+        yield AgentProgress("会话历史已恢复。")
 
     async def stream_turn(self, user_text: str) -> AsyncIterator[TurnEvent]:
         """流式执行一轮，并只在完整成功后提交历史。"""
@@ -173,19 +244,21 @@ class ConversationSession:
         if self._context_manager is not None:
             self._context_manager.record_user_message(user_message.content)
 
-        for iteration in range(1, self._config.max_iterations + 1):
-            yield AgentProgress(f"模型迭代 {iteration}/{self._config.max_iterations}", iteration)
-            request = self._build_normal_request(pending, tools, turn_kind, iteration)
+        model_request = 1
+        tool_iterations = 0
+        while True:
+            yield AgentProgress(f"模型请求 {model_request}", model_request)
+            request = self._build_normal_request(pending, tools, turn_kind, model_request)
             if (
                 self._context_manager is not None
                 and self._context_manager.needs_automatic_compaction(request)
             ):
-                yield AgentProgress("上下文接近窗口，正在压缩已完成历史。", iteration)
+                yield AgentProgress("上下文接近窗口，正在压缩已完成历史。", model_request)
                 stopped = await self._compact_automatically(pending)
                 if stopped is not None:
                     yield stopped
                     return
-                request = self._build_normal_request(pending, tools, turn_kind, iteration)
+                request = self._build_normal_request(pending, tools, turn_kind, model_request)
 
             completed: StreamCompleted | None = None
             async for event in self._provider.stream(request):
@@ -201,7 +274,7 @@ class ConversationSession:
                 raise ProviderError(ProviderErrorKind.STREAM, "模型流没有正常结束。")
             if self._context_manager is not None:
                 self._context_manager.record_normal_usage(request, completed.usage)
-            yield TokenUsageReported(completed.usage, iteration)
+            yield TokenUsageReported(completed.usage, model_request)
 
             assistant_message = completed.message
             if assistant_message.role is not Role.ASSISTANT:
@@ -214,8 +287,25 @@ class ConversationSession:
                 self._messages = (*self._messages, *pending)
                 if save_plan_task is not None:
                     self._saved_plan = SavedPlan(save_plan_task, assistant_message.content)
+                if self._session_journal is not None:
+                    try:
+                        self._session_journal.append(pending)
+                    except OSError:
+                        yield AgentStopped(
+                            AgentStopReason.SESSION_ARCHIVE_FAILED,
+                            "会话存档失败，但本轮回答已保留在当前进程中。",
+                        )
+                if self._memory_worker is not None:
+                    self._memory_worker.submit(MemoryJob(tuple(pending)))
                 return
 
+            if tool_iterations >= self._config.max_iterations:
+                yield AgentStopped(
+                    AgentStopReason.ITERATION_LIMIT,
+                    f"已达到 {self._config.max_iterations} 次自主工具迭代上限，已停止本轮任务。",
+                )
+                return
+            tool_iterations += 1
             results: list[ToolExecutionResult] = []
             async for event in self._execute_tool_calls(assistant_message.tool_calls):
                 if isinstance(event, ToolExecutionFinished):
@@ -243,11 +333,7 @@ class ConversationSession:
                     f"连续 {self._config.unknown_tool_limit} 次调用未知工具，已停止本轮任务。",
                 )
                 return
-
-        yield AgentStopped(
-            AgentStopReason.ITERATION_LIMIT,
-            f"已达到 {self._config.max_iterations} 次模型迭代上限，已停止本轮任务。",
-        )
+            model_request += 1
 
     def _build_normal_request(
         self,
@@ -255,19 +341,30 @@ class ConversationSession:
         tools: Sequence[ToolDefinition],
         turn_kind: TurnKind,
         iteration: int,
+        *,
+        include_resumption_notice: bool = True,
     ) -> ProviderRequest:
         """构建带动态摘要补充的普通 Provider 请求。"""
 
         visible_tools = enhance_tool_definitions(tools)
         context = self._context_factory(turn_kind, iteration, visible_tools)
+        additional_instructions = context.additional_system_instructions
+        if include_resumption_notice and self._resumption_notice is not None:
+            additional_instructions = (
+                *additional_instructions,
+                SystemInstruction("session_gap", self._resumption_notice, priority=95),
+            )
+            self._resumption_notice = None
         if self._context_manager is not None:
             context = replace(
                 context,
                 additional_system_instructions=(
-                    *context.additional_system_instructions,
+                    *additional_instructions,
                     *self._context_manager.system_instructions(),
                 ),
             )
+        elif additional_instructions != context.additional_system_instructions:
+            context = replace(context, additional_system_instructions=additional_instructions)
         prompt = self._prompt_builder.build(context, visible_tools)
         return ProviderRequest(
             messages=(*self._messages, *pending),
@@ -275,6 +372,26 @@ class ConversationSession:
             prompt=prompt,
             cache=self._cache_policy,
         )
+
+    async def _compact_recovered_history(self) -> AgentStopped | None:
+        """恢复历史超预算时执行且仅执行一次摘要请求。"""
+
+        assert self._context_manager is not None
+        if self._context_manager.circuit_open:
+            return self._circuit_stopped()
+        plan = self._context_manager.plan_compaction(self._messages, ())
+        if plan is None:
+            return AgentStopped(
+                AgentStopReason.SESSION_RESTORE_FAILED,
+                "恢复历史超出上下文预算，且没有可安全压缩的消息。",
+            )
+        return await self._run_summary(plan)
+
+    def _gap_notice(self, updated_at: datetime) -> str | None:
+        store = self._session_store
+        if store is None or not store.is_long_gap(updated_at):
+            return None
+        return "该恢复会话与上次活动相隔较久，请先确认当前文件和任务状态，不要假设前一轮仍在执行。"
 
     async def _handle_compact_command(self) -> AsyncIterator[TurnEvent]:
         """无条件执行一次手动摘要，不进入普通 Agent Loop。"""

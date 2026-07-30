@@ -10,11 +10,15 @@ from okcode.config import load_config
 from okcode.context import ArtifactStore, ContextManager
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
+from okcode.instructions import InstructionLoader, InstructionPaths
 from okcode.mcp import McpClientManager, McpConfigPaths, load_mcp_config
 from okcode.mcp.models import McpDiscoveryWarning
+from okcode.memory import MemoryPaths, MemoryStore
+from okcode.memory.worker import MemoryWorker
 from okcode.permissions import PermissionManager, PermissionPaths, load_permission_rules
-from okcode.prompt import PromptCachePolicy
+from okcode.prompt import PromptCachePolicy, RuntimePromptContextFactory
 from okcode.providers.factory import create_provider
+from okcode.sessions import SessionStore
 from okcode.terminal import TerminalUI
 from okcode.tools.defaults import build_default_registry
 from okcode.tools.executor import ToolExecutor
@@ -34,8 +38,19 @@ def main() -> int:
     runner = asyncio.Runner()
     provider = None
     mcp_manager = None
+    memory_worker = None
     try:
         workspace = Workspace(Path.cwd())
+        session_store = SessionStore(workspace.root)
+        session_store.cleanup_expired()
+        instructions = InstructionLoader(
+            InstructionPaths.for_workspace(workspace.root), workspace.root
+        ).load()
+        memory_store = MemoryStore(MemoryPaths.for_workspace(workspace.root))
+        memory_worker = MemoryWorker(
+            lambda: create_provider(config.active_provider),
+            memory_store,
+        )
         registry = build_default_registry(workspace)
         mcp_config = load_mcp_config(McpConfigPaths.for_workspace(workspace.root))
         mcp_manager = McpClientManager(mcp_config.servers)
@@ -70,6 +85,14 @@ def main() -> int:
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
             permissions=permissions,
             context_manager=ContextManager(ArtifactStore(workspace.root)),
+            context_factory=RuntimePromptContextFactory(
+                workspace.root,
+                instructions,
+                memory_store,
+            ),
+            session_store=session_store,
+            session_journal=session_store.create_journal(),
+            memory_worker=memory_worker,
         )
         for warning in warnings:
             ui.show_mcp_warning(warning)
@@ -82,6 +105,11 @@ def main() -> int:
         ui.show_startup_error()
         return 1
     finally:
+        if memory_worker is not None:
+            try:
+                memory_worker.close()
+            except Exception:
+                pass
         if mcp_manager is not None:
             try:
                 runner.run(mcp_manager.aclose())

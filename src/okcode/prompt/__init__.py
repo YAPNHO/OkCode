@@ -10,6 +10,7 @@ from okcode.prompt.builder import (
 )
 from okcode.prompt.cache import PromptCachePolicy, PromptCacheUsage
 from okcode.prompt.modes import TaskModeInstructionPlanner, TaskModeSchedule, TurnKind
+from okcode.prompt.runtime import RuntimePromptContextFactory
 from okcode.prompt.tools import enhance_tool_definitions
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "PromptCacheUsage",
     "PromptOptionalSections",
     "PromptSection",
+    "RuntimePromptContextFactory",
     "SystemInstruction",
     "TaskModeInstructionPlanner",
     "TaskModeSchedule",

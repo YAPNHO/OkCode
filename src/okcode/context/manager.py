@@ -45,6 +45,15 @@ class ContextManager:
 
         self.state.original_user_messages = (*self.state.original_user_messages, content)
 
+    def restore_history(self, messages: Sequence[ChatMessage]) -> None:
+        """用恢复的历史重建用户原文，并丢弃旧进程的上下文状态。"""
+
+        self.state = ConversationContextState(
+            original_user_messages=tuple(
+                message.content for message in messages if message.role is Role.USER
+            )
+        )
+
     def normalize_tool_results(
         self,
         results: Sequence[ToolExecutionResult],

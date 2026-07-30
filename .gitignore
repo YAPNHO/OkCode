@@ -10,5 +10,6 @@ dist/
 .okcode/*
 !.okcode/
 !.okcode/permissions.yaml
+.okcode/memory/
 config.yaml
 *.egg-info/

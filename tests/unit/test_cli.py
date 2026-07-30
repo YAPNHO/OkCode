@@ -6,7 +6,9 @@ from okcode.mcp.models import McpConfig, McpDiscoveryResult, McpDiscoveryWarning
 from okcode.mcp.tool import McpRemoteTool
 from okcode.models import AppConfig, ProviderConfig, ProviderProtocol
 from okcode.permissions.models import PermissionConfirmation, PermissionRequest
+from okcode.prompt import RuntimePromptContextFactory
 from okcode.providers.factory import create_provider
+from okcode.sessions import SessionStore
 from okcode.tools.registry import ToolRegistry
 
 
@@ -144,6 +146,55 @@ def test_main_builds_default_tool_system_from_current_directory(monkeypatch, tmp
         "search_code",
         "write_file",
     ]
+    assert isinstance(conversation._session_store, SessionStore)  # type: ignore[attr-defined]
+    assert conversation._session_journal is not None  # type: ignore[attr-defined]
+    assert isinstance(conversation._context_factory, RuntimePromptContextFactory)  # type: ignore[attr-defined]
+    assert conversation._memory_worker is not None  # type: ignore[attr-defined]
+
+
+def test_main_closes_memory_worker_before_mcp_and_provider(monkeypatch, tmp_path) -> None:
+    ui = StubUI()
+    close_order: list[str] = []
+
+    class Worker:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            close_order.append("memory")
+
+    class Manager:
+        def __init__(self, _: object) -> None:
+            pass
+
+        async def discover_tools(self) -> McpDiscoveryResult:
+            return McpDiscoveryResult(())
+
+        async def aclose(self) -> None:
+            close_order.append("mcp")
+
+    class Provider:
+        async def aclose(self) -> None:
+            close_order.append("provider")
+
+    class App:
+        def __init__(self, *_: object) -> None:
+            pass
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "TerminalUI", lambda: ui)
+    monkeypatch.setattr(cli, "load_config", _config)
+    monkeypatch.setattr(cli, "load_mcp_config", lambda _: McpConfig())
+    monkeypatch.setattr(cli, "MemoryWorker", Worker)
+    monkeypatch.setattr(cli, "McpClientManager", Manager)
+    monkeypatch.setattr(cli, "create_provider", lambda _: Provider())
+    monkeypatch.setattr(cli, "OkCodeApp", App)
+
+    assert cli.main() == 0
+    assert close_order == ["memory", "mcp", "provider"]
 
 
 def test_invalid_permission_rules_do_not_create_provider(monkeypatch, tmp_path) -> None:

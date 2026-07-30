@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,16 @@ from okcode.conversation import AgentConfig, ConversationSession
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.mcp.models import McpCallResult, McpRemoteToolInfo
 from okcode.mcp.tool import McpRemoteTool
+from okcode.memory.models import (
+    MemoryAction,
+    MemoryCategory,
+    MemoryIndexEntry,
+    MemoryOperation,
+    MemoryPaths,
+    MemoryScope,
+    MemoryUpdate,
+)
+from okcode.memory.store import MemoryStore
 from okcode.models import (
     AgentProgress,
     AgentStopped,
@@ -29,7 +40,8 @@ from okcode.models import (
 from okcode.permissions.manager import PermissionManager
 from okcode.permissions.models import PermissionConfirmation, PermissionMode
 from okcode.permissions.rules import PermissionPaths
-from okcode.prompt import TurnKind
+from okcode.prompt import RuntimePromptContextFactory, TurnKind
+from okcode.sessions import SessionConfig, SessionStore
 from okcode.tools.executor import ToolExecutor
 from okcode.tools.models import (
     JSONValue,
@@ -52,6 +64,8 @@ def _session(
     *,
     config: AgentConfig | None = None,
     context_manager: ContextManager | None = None,
+    session_store: SessionStore | None = None,
+    memory_worker: object | None = None,
 ) -> ConversationSession:
     actual_registry = registry or ToolRegistry()
     return ConversationSession(
@@ -60,6 +74,9 @@ def _session(
         ToolExecutor(actual_registry),
         config=config,
         context_manager=context_manager,
+        session_store=session_store,
+        session_journal=session_store.create_journal() if session_store is not None else None,
+        memory_worker=memory_worker,  # type: ignore[arg-type]
     )
 
 
@@ -129,6 +146,22 @@ class ControlledCommandTool:
         return ToolOutput("命令成功", {"command": arguments["command"]})
 
 
+class RecordingMemoryWorker:
+    def __init__(self) -> None:
+        self.jobs = []
+
+    def submit(self, job: object) -> None:
+        self.jobs.append(job)
+
+
+class MutableClock:
+    def __init__(self, value: datetime) -> None:
+        self.value = value
+
+    def __call__(self) -> datetime:
+        return self.value
+
+
 @pytest.mark.asyncio
 async def test_successful_turn_forwards_delta_and_commits_atomically() -> None:
     provider = FakeProvider(
@@ -141,7 +174,7 @@ async def test_successful_turn_forwards_delta_and_commits_atomically() -> None:
     session = _session(provider)
     events = [event async for event in session.stream_turn("问题")]
     assert events[:3] == [
-        AgentProgress("模型迭代 1/12", 1),
+        AgentProgress("模型请求 1", 1),
         ThinkingDelta("分析"),
         TextDelta("答案"),
     ]
@@ -355,13 +388,45 @@ async def test_unknown_tool_limit_stops_without_commit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_iteration_limit_stops_without_thirteenth_request_or_commit() -> None:
+async def test_tool_iteration_limit_allows_final_answer_after_last_allowed_tool() -> None:
     tool = ControlledTool()
     registry = ToolRegistry()
     registry.register(tool)
     call = ToolCall("tool-1", "controlled", "{}")
     provider = FakeProvider(
         [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "最终回答"))],
+        ]
+    )
+    session = _session(provider, registry, config=AgentConfig(max_iterations=2))
+
+    events = [event async for event in session.stream_turn("循环")]
+
+    assert not any(isinstance(event, AgentStopped) for event in events)
+    assert len(provider.requests) == 3
+    assert tool.calls == 2
+    assert [message.role for message in session.messages] == [
+        Role.USER,
+        Role.ASSISTANT,
+        Role.TOOL,
+        Role.ASSISTANT,
+        Role.TOOL,
+        Role.ASSISTANT,
+    ]
+    assert session.messages[-1].content == "最终回答"
+
+
+@pytest.mark.asyncio
+async def test_tool_iteration_limit_stops_before_executing_next_tool_or_commit() -> None:
+    tool = ControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    call = ToolCall("tool-1", "controlled", "{}")
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
             [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
             [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=call))],
             [StreamCompleted(ChatMessage(Role.ASSISTANT, "不应请求"))],
@@ -373,8 +438,36 @@ async def test_iteration_limit_stops_without_thirteenth_request_or_commit() -> N
 
     stopped = [event for event in events if isinstance(event, AgentStopped)]
     assert stopped[-1].reason is AgentStopReason.ITERATION_LIMIT
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 3
+    assert tool.calls == 2
     assert session.messages == ()
+
+
+@pytest.mark.asyncio
+async def test_direct_user_conversation_is_not_capped_by_tool_iteration_limit() -> None:
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "第一答"))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "第二答"))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "第三答"))],
+        ]
+    )
+    session = _session(provider, config=AgentConfig(max_iterations=1))
+
+    first = [event async for event in session.stream_turn("第一问")]
+    second = [event async for event in session.stream_turn("第二问")]
+    third = [event async for event in session.stream_turn("第三问")]
+
+    assert not any(isinstance(event, AgentStopped) for event in (*first, *second, *third))
+    assert len(provider.requests) == 3
+    assert [message.content for message in session.messages] == [
+        "第一问",
+        "第一答",
+        "第二问",
+        "第二答",
+        "第三问",
+        "第三答",
+    ]
 
 
 @pytest.mark.asyncio
@@ -660,3 +753,154 @@ async def test_three_summary_failures_open_circuit_without_changing_history(tmp_
             "上下文摘要连续失败 3 次，当前会话已熔断，不再发起摘要请求。",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_successful_turn_persists_messages_and_submits_memory_job(tmp_path: Path) -> None:
+    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, "完成"))])
+    worker = RecordingMemoryWorker()
+    store = SessionStore(tmp_path, clock=lambda: datetime(2026, 7, 30, 10, tzinfo=UTC))
+    session = _session(provider, session_store=store, memory_worker=worker)
+
+    _ = [event async for event in session.stream_turn("记录这一轮")]
+
+    descriptors = store.list_resumable()
+    assert len(descriptors) == 1
+    restored = store.restore(descriptors[0].id)
+    assert [message.content for message in restored.messages] == ["记录这一轮", "完成"]
+    assert len(worker.jobs) == 1
+    assert [message.content for message in worker.jobs[0].messages] == ["记录这一轮", "完成"]
+
+
+@pytest.mark.asyncio
+async def test_new_session_injects_instruction_and_two_memory_indexes_without_old_messages(
+    tmp_path: Path,
+) -> None:
+    memory_store = MemoryStore(MemoryPaths(tmp_path / "memory", tmp_path / "user-memory"))
+    memory_store.apply(
+        MemoryUpdate(
+            (
+                MemoryOperation(
+                    MemoryScope.USER,
+                    MemoryCategory.PREFERENCE,
+                    MemoryAction.CREATE,
+                    "user-note",
+                    "User note",
+                    "user memory",
+                ),
+                MemoryOperation(
+                    MemoryScope.PROJECT,
+                    MemoryCategory.PROJECT_KNOWLEDGE,
+                    MemoryAction.CREATE,
+                    "project-note",
+                    "Project note",
+                    "project memory",
+                ),
+            ),
+            (MemoryIndexEntry("user-note", MemoryCategory.PREFERENCE, "user summary"),),
+            (
+                MemoryIndexEntry(
+                    "project-note",
+                    MemoryCategory.PROJECT_KNOWLEDGE,
+                    "project summary",
+                ),
+            ),
+        )
+    )
+    factory = RuntimePromptContextFactory(
+        tmp_path,
+        "project instruction",
+        memory_store,
+        current_date=lambda: date(2026, 7, 30),
+        platform_name=lambda: "Windows",
+    )
+    provider = FakeProvider([StreamCompleted(ChatMessage(Role.ASSISTANT, "answer"))])
+    registry = ToolRegistry()
+    session = ConversationSession(
+        provider,
+        registry,
+        ToolExecutor(registry),
+        context_factory=factory,
+    )
+
+    _ = [event async for event in session.stream_turn("new question")]
+
+    request = provider.provider_requests[0]
+    assert [message.content for message in request.messages] == ["new question"]
+    instructions = {item.kind: item.content for item in request.prompt.dynamic_system}
+    assert instructions["custom"] == "project instruction"
+    assert "user summary" in instructions["memory"]
+    assert "project summary" in instructions["memory"]
+
+
+@pytest.mark.asyncio
+async def test_restore_keeps_new_session_empty_until_selected_history_is_used(
+    tmp_path: Path,
+) -> None:
+    old_time = datetime(2026, 7, 28, 10, tzinfo=UTC)
+    clock = MutableClock(old_time)
+    store = SessionStore(
+        tmp_path,
+        config=SessionConfig(long_gap=timedelta(hours=1)),
+        clock=clock,
+    )
+    old_journal = store.create_journal()
+    old_journal.append((ChatMessage(Role.USER, "旧问题"), ChatMessage(Role.ASSISTANT, "旧回答")))
+    clock.value = datetime(2026, 7, 30, 10, tzinfo=UTC)
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "继续回答"))],
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, "再次回答"))],
+        ]
+    )
+    session = _session(provider, session_store=store)
+
+    events = [event async for event in session.restore_session(old_journal.session_id)]
+    _ = [event async for event in session.stream_turn("继续任务")]
+    _ = [event async for event in session.stream_turn("再次任务")]
+
+    assert not any(isinstance(event, AgentStopped) for event in events)
+    assert [message.content for message in provider.provider_requests[0].messages] == [
+        "旧问题",
+        "旧回答",
+        "继续任务",
+    ]
+    dynamic_kinds = [item.kind for item in provider.provider_requests[0].prompt.dynamic_system]
+    assert dynamic_kinds.count("session_gap") == 1
+    assert all(
+        item.kind != "session_gap" for item in provider.provider_requests[1].prompt.dynamic_system
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_compacts_once_before_replacing_history(tmp_path: Path) -> None:
+    clock = MutableClock(datetime(2026, 7, 30, 10, tzinfo=UTC))
+    store = SessionStore(tmp_path, clock=clock)
+    journal = store.create_journal()
+    journal.append(
+        (
+            ChatMessage(Role.USER, "旧请求" + "x" * 10_000),
+            ChatMessage(Role.ASSISTANT, "旧回答"),
+        )
+    )
+    provider = FakeProvider([[StreamCompleted(ChatMessage(Role.ASSISTANT, _summary_response()))]])
+    context = ContextManager(
+        ArtifactStore(tmp_path, "restore-compact"),
+        ContextConfig(
+            context_window_tokens=10_000,
+            automatic_compaction_tokens=8_000,
+            summary_output_reserve_tokens=1_000,
+            safety_margin_tokens=1_000,
+            chars_per_token=1,
+            retain_recent_tokens=1,
+            retain_recent_messages=1,
+        ),
+    )
+    session = _session(provider, context_manager=context, session_store=store)
+
+    events = [event async for event in session.restore_session(journal.session_id)]
+
+    assert not any(isinstance(event, AgentStopped) for event in events)
+    assert len(provider.provider_requests) == 1
+    assert provider.provider_requests[0].tools == ()
+    assert context.state.summary is not None

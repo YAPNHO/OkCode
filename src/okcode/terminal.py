@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TextIO
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.rule import Rule
+from rich.table import Table
 
 from okcode.errors import ProviderError
 from okcode.mcp.models import McpDiscoveryWarning
@@ -26,6 +28,7 @@ from okcode.models import (
     VisibleDelta,
 )
 from okcode.permissions.models import PermissionConfirmation, PermissionRequest
+from okcode.sessions import SessionDescriptor
 from okcode.tools.models import ToolErrorCode
 
 
@@ -59,6 +62,66 @@ class TerminalUI:
         self._console.print(
             f"OkCode | {config.name} | {config.protocol} | {config.model} | 权限：{permission_mode}"
         )
+
+    def select_session(self, sessions: Sequence[SessionDescriptor]) -> str | None:
+        """展示可恢复会话，并返回用户选中的日志 ID。"""
+
+        if not sessions:
+            self._console.print(
+                "\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4f1a\u8bdd\u3002", style="dim"
+            )
+            return None
+
+        self._finish_line()
+        table = Table(
+            title="\u53ef\u6062\u590d\u4f1a\u8bdd",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("\u7f16\u53f7", justify="right", no_wrap=True)
+        table.add_column("\u4f1a\u8bdd ID", no_wrap=True)
+        table.add_column("\u6807\u9898")
+        table.add_column("\u6d88\u606f\u6570", justify="right", no_wrap=True)
+        table.add_column("\u6700\u8fd1\u66f4\u65b0", no_wrap=True)
+        for index, session in enumerate(sessions, start=1):
+            table.add_row(
+                str(index),
+                session.id,
+                session.title,
+                str(session.message_count),
+                session.updated_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+            )
+        self._console.print(table)
+
+        while True:
+            try:
+                session = self._session
+                if session is None:
+                    session = PromptSession(history=InMemoryHistory())
+                    self._session = session
+                choice = session.prompt(
+                    "\u6062\u590d\u7f16\u53f7\uff08\u56de\u8f66\u6216 /cancel \u53d6\u6d88\uff09> "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                self._console.print("\u5df2\u53d6\u6d88\u6062\u590d\u3002", style="dim")
+                return None
+            if not choice or choice.lower() == "/cancel":
+                self._console.print("\u5df2\u53d6\u6d88\u6062\u590d\u3002", style="dim")
+                return None
+            try:
+                index = int(choice)
+            except ValueError:
+                self._console.print(
+                    "\u8bf7\u8f93\u5165\u4f1a\u8bdd\u7f16\u53f7\uff0c\u6216\u6309\u56de\u8f66\u53d6\u6d88\u3002",
+                    style="yellow",
+                )
+                continue
+            if 1 <= index <= len(sessions):
+                return sessions[index - 1].id
+            self._console.print(
+                "\u4f1a\u8bdd\u7f16\u53f7\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002",
+                style="yellow",
+            )
 
     async def confirm_permission(self, request: PermissionRequest) -> PermissionConfirmation:
         """在运行中的事件循环内等待一次明确的用户决定。"""
@@ -138,6 +201,11 @@ class TerminalUI:
 
     def show_startup_error(self) -> None:
         self._console.print("启动失败，请检查配置和依赖。")
+
+    def show_runtime_error(self, error: Exception) -> None:
+        self._finish_line()
+        self._console.print(f"运行错误：{type(error).__name__}: {error}", style="red")
+        self._reset_turn()
 
     def show_mcp_warning(self, warning: McpDiscoveryWarning) -> None:
         """显示不包含连接详情或凭据的 MCP Server 启动告警。"""
