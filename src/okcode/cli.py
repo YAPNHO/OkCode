@@ -16,10 +16,22 @@ from okcode.mcp import McpClientManager, McpConfigPaths, load_mcp_config
 from okcode.mcp.models import McpDiscoveryWarning
 from okcode.memory import MemoryPaths, MemoryStore
 from okcode.memory.worker import MemoryWorker
+from okcode.models import ChatMessage
 from okcode.permissions import PermissionManager, PermissionPaths, load_permission_rules
 from okcode.prompt import PromptCachePolicy, RuntimePromptContextFactory
 from okcode.providers.factory import create_provider
 from okcode.sessions import SessionStore
+from okcode.skills import (
+    LOAD_SKILL_TOOL_NAME,
+    LoadSkillTool,
+    SkillActivationStore,
+    SkillCatalog,
+    SkillRoots,
+    SkillRunner,
+    SkillRuntime,
+    SkillValidationError,
+)
+from okcode.skills.discovery import dedicated_tool_names
 from okcode.terminal import TerminalUI
 from okcode.tools.defaults import build_default_registry
 from okcode.tools.executor import ToolExecutor
@@ -70,27 +82,66 @@ def main() -> int:
                     )
                 )
         known_tool_names = {definition.name for definition in registry.definitions()}
+        skill_catalog = SkillCatalog(SkillRoots.for_workspace(workspace.root), known_tool_names)
+        skill_runtime = SkillRuntime(
+            skill_catalog,
+            SkillActivationStore(),
+            command_registry,
+        )
+        skill_runtime.refresh()
+        permission_tool_names = {
+            *known_tool_names,
+            LOAD_SKILL_TOOL_NAME,
+            *dedicated_tool_names(skill_catalog.list()),
+        }
         paths = PermissionPaths.for_workspace(workspace.root)
-        rule_sets = load_permission_rules(paths, known_tool_names)
+        rule_sets = load_permission_rules(paths, permission_tool_names)
         permissions = PermissionManager(
             workspace,
             rule_sets,
             paths,
-            known_tool_names,
+            permission_tool_names,
             confirmer=ui.confirm_permission,
         )
         provider = create_provider(config.active_provider)
+        executor = ToolExecutor(registry, permissions=permissions)
+        context_manager = ContextManager(ArtifactStore(workspace.root))
+        runner_for_skill = SkillRunner(
+            provider,
+            cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
+            executor=executor,
+        )
+
+        def active_history() -> tuple[ChatMessage, ...]:
+            return conversation.messages
+
+        def context_summary() -> str | None:
+            return context_manager.state.summary
+
+        registry.register(
+            LoadSkillTool(
+                skill_catalog,
+                skill_runtime.activation_store,
+                registry,
+                runner=runner_for_skill,
+                history_provider=active_history,
+                history_summary_provider=context_summary,
+                refresh_callback=skill_runtime.refresh,
+            )
+        )
         conversation = ConversationSession(
             provider,
             registry,
-            ToolExecutor(registry, permissions=permissions),
+            executor,
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
             permissions=permissions,
-            context_manager=ContextManager(ArtifactStore(workspace.root)),
+            context_manager=context_manager,
             context_factory=RuntimePromptContextFactory(
                 workspace.root,
                 instructions,
                 memory_store,
+                available_skills_provider=skill_runtime.render_available_section,
+                active_skills_provider=skill_runtime.render_active_section,
             ),
             session_store=session_store,
             session_journal=session_store.create_journal(),
@@ -98,15 +149,23 @@ def main() -> int:
             memory_worker=memory_worker,
             model_name=config.active_provider.model,
             workspace_root=workspace.root,
+            skill_runtime=skill_runtime,
         )
         set_command_registry = getattr(ui, "set_command_registry", None)
         if callable(set_command_registry):
             set_command_registry(command_registry)
         for warning in warnings:
             ui.show_mcp_warning(warning)
-        app = OkCodeApp(ui, conversation, runner, config.active_provider, command_registry)
+        app = OkCodeApp(
+            ui,
+            conversation,
+            runner,
+            config.active_provider,
+            command_registry,
+            skill_runtime,
+        )
         return app.run()
-    except ConfigError as error:
+    except (ConfigError, SkillValidationError) as error:
         ui.show_config_error(str(error))
         return 2
     except Exception:

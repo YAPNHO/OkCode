@@ -30,12 +30,14 @@ class OkCodeApp:
         runner: asyncio.Runner,
         config: ProviderConfig,
         command_registry: CommandRegistry | None = None,
+        skill_runtime: object | None = None,
     ) -> None:
         self._ui = ui
         self._conversation = conversation
         self._runner = runner
         self._config = config
         self._command_registry = command_registry or build_default_command_registry()
+        self._skill_runtime = skill_runtime
         self._dispatcher = CommandDispatcher(self._command_registry)
         set_registry = getattr(self._ui, "set_command_registry", None)
         if callable(set_registry):
@@ -73,6 +75,7 @@ class OkCodeApp:
             self._command_registry,
             self._conversation,
             Path.cwd(),
+            self._skill_runtime,
         )
         dispatched = await self._dispatcher.dispatch(text, context)
         if dispatched.kind is DispatchResultKind.EMPTY:

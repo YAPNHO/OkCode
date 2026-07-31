@@ -166,3 +166,4 @@ class CommandContext:
     registry: object
     conversation: CommandConversationPort
     workspace_root: Path
+    skill_runtime: object | None = None

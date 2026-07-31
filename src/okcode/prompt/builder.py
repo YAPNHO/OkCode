@@ -45,6 +45,7 @@ class PromptOptionalSections:
     """后续项目指令、Skill 和记忆功能的预留输入。"""
 
     custom_instructions: str = ""
+    available_skills: str = ""
     active_skills: str = ""
     long_term_memory: str = ""
 
@@ -104,6 +105,7 @@ class PromptBuilder:
         dynamic: list[SystemInstruction] = [environment]
         optional = optional_sections(
             custom_instructions=context.optional_sections.custom_instructions,
+            available_skills=context.optional_sections.available_skills,
             active_skills=context.optional_sections.active_skills,
             long_term_memory=context.optional_sections.long_term_memory,
         )
@@ -144,6 +146,7 @@ class PromptBuilder:
 def _section_kind(name: str) -> str:
     return {
         "自定义指令": "custom",
+        "可用 Skill": "available_skills",
         "已激活的 Skill": "skill",
         "长期记忆": "memory",
     }[name]

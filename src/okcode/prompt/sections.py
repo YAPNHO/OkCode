@@ -75,14 +75,16 @@ def environment_content(
 def optional_sections(
     *,
     custom_instructions: str = "",
+    available_skills: str = "",
     active_skills: str = "",
     long_term_memory: str = "",
 ) -> tuple[SectionTemplate, ...]:
     """返回环境信息之后的可选模块，空内容不产生模块。"""
 
     candidates = (
+        SectionTemplate("已激活的 Skill", 81, active_skills.strip()),
         SectionTemplate("自定义指令", 90, custom_instructions.strip()),
-        SectionTemplate("已激活的 Skill", 100, active_skills.strip()),
+        SectionTemplate("可用 Skill", 95, available_skills.strip()),
         SectionTemplate("长期记忆", 110, long_term_memory.strip()),
     )
     return tuple(section for section in candidates if section.content)

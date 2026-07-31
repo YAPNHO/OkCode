@@ -59,8 +59,8 @@ def test_builder_orders_fixed_environment_and_optional_sections() -> None:
         "## 语气风格",
         "## 文本输出",
         "## 环境信息",
-        "## 自定义指令",
         "## 已激活的 Skill",
+        "## 自定义指令",
         "## 长期记忆",
     )
     indexes = [bundle.debug_full_prompt.index(section) for section in expected]

@@ -49,6 +49,18 @@ def test_registry_rejects_duplicate_empty_and_invalid_timeout() -> None:
         registry.register(FakeTool("slow", timeout_seconds=0))
 
 
+def test_registry_replaces_existing_tool_for_hot_updated_skill_package() -> None:
+    registry = ToolRegistry()
+    first = FakeTool("skill__demo__echo")
+    replacement = FakeTool("skill__demo__echo", timeout_seconds=2)
+    registry.register(first)
+
+    registry.replace(replacement)
+
+    assert registry.get("skill__demo__echo") is replacement
+    assert registry.definitions()[0].timeout_seconds == 2
+
+
 def test_default_registry_contains_exactly_six_tools(tmp_path: Path) -> None:
     registry = build_default_registry(Workspace(tmp_path))
     definitions = registry.definitions()

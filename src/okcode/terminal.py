@@ -27,6 +27,7 @@ from okcode.models import (
     PermissionStatus,
     ProviderConfig,
     RuntimeModeChanged,
+    SkillListEvent,
     TextDelta,
     ThinkingDelta,
     TokenUsageReported,
@@ -195,6 +196,8 @@ class TerminalUI:
             self._render_command_memory(event)
         elif isinstance(event, CommandSession):
             self._render_command_session(event)
+        elif isinstance(event, SkillListEvent):
+            self._render_skill_list(event)
         elif isinstance(event, RuntimeModeChanged):
             self._render_runtime_mode_changed(event)
 
@@ -409,6 +412,25 @@ class TerminalUI:
         self._finish_line()
         self._console.print(f"会话 ID：{event.session_id or '（未启用）'}", style="dim")
         self._console.print(f"存档文件：{event.journal_path or '（未启用）'}", style="dim")
+        self._turn_open = True
+
+    def _render_skill_list(self, event: SkillListEvent) -> None:
+        self._finish_line()
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Skill", no_wrap=True)
+        table.add_column("来源", no_wrap=True)
+        table.add_column("状态", no_wrap=True)
+        table.add_column("说明")
+        for entry in event.entries:
+            table.add_row(
+                entry.name,
+                entry.source,
+                "已激活" if entry.active else "可加载",
+                entry.description,
+            )
+        self._console.print(table)
+        for issue in event.issues:
+            self._console.print(f"Skill 问题：{issue}", style="yellow")
         self._turn_open = True
 
     def _render_runtime_mode_changed(self, event: RuntimeModeChanged) -> None:

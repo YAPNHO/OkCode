@@ -25,12 +25,16 @@ class RuntimePromptContextFactory:
         custom_instructions: str,
         memory_store: MemoryStore,
         *,
+        available_skills_provider: Callable[[], str] | None = None,
+        active_skills_provider: Callable[[], str] | None = None,
         current_date: Callable[[], date] | None = None,
         platform_name: Callable[[], str] | None = None,
     ) -> None:
         self._workspace_root = workspace_root
         self._custom_instructions = custom_instructions
         self._memory_store = memory_store
+        self._available_skills_provider = available_skills_provider or (lambda: "")
+        self._active_skills_provider = active_skills_provider or (lambda: "")
         self._current_date = current_date or date.today
         self._platform_name = platform_name or host_platform.platform
 
@@ -51,6 +55,8 @@ class RuntimePromptContextFactory:
             iteration=iteration,
             optional_sections=PromptOptionalSections(
                 custom_instructions=self._custom_instructions,
+                available_skills=self._available_skills_provider(),
+                active_skills=self._active_skills_provider(),
                 long_term_memory=self._memory_store.read_context(),
             ),
         )

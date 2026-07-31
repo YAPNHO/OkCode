@@ -125,6 +125,7 @@ class ProviderRequest:
     tools: tuple[ToolDefinition, ...]
     prompt: PromptBundle
     cache: PromptCachePolicy
+    model_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +281,25 @@ class CommandSession:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillListEntry:
+    """/skill 列表中的一行。"""
+
+    name: str
+    description: str
+    source: str
+    active: bool
+    version_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SkillListEvent:
+    """/skill 命令输出。"""
+
+    entries: tuple[SkillListEntry, ...]
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeModeChanged:
     """运行时模式切换提示。"""
 
@@ -304,5 +324,6 @@ type TurnEvent = (
     | CommandStatus
     | CommandMemory
     | CommandSession
+    | SkillListEvent
     | RuntimeModeChanged
 )

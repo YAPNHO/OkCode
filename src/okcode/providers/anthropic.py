@@ -59,7 +59,7 @@ class AnthropicProvider:
         saw_message_stop = False
         try:
             request: dict[str, Any] = {
-                "model": self._config.model,
+                "model": request_data.model_override or self._config.model,
                 "max_tokens": _MAX_TOKENS,
                 "messages": self._serialize_messages(request_data.messages),
             }

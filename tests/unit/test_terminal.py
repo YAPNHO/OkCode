@@ -13,6 +13,8 @@ from okcode.models import (
     AgentStopped,
     AgentStopReason,
     PermissionStatus,
+    SkillListEntry,
+    SkillListEvent,
     TextDelta,
     ThinkingDelta,
     TokenUsage,
@@ -188,6 +190,23 @@ def test_agent_events_show_progress_usage_and_stop_message() -> None:
     assert "模型请求 read_file" in text
     assert "Token：第 1 轮用量不可用。" in text
     assert "停止：没有可执行的计划" in text
+
+
+def test_skill_list_renders_metadata_activation_and_issues() -> None:
+    ui, output = _ui(width=120)
+    ui.render_event(
+        SkillListEvent(
+            (SkillListEntry("review", "审查改动", "project", True, "v1"),),
+            ("project:bad.md YAML 错误",),
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "review" in text
+    assert "project" in text
+    assert "已激活" in text
+    assert "Skill 问题" in text
 
 
 def test_token_usage_shows_real_cache_fields_when_available() -> None:

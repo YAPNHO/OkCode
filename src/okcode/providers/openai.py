@@ -57,7 +57,7 @@ class OpenAIProvider:
         tool_calls: dict[int, _OpenAIToolCallParts] = {}
         try:
             request: dict[str, Any] = {
-                "model": self._config.model,
+                "model": request_data.model_override or self._config.model,
                 "messages": [
                     *self._serialize_prompt_messages(request_data.prompt),
                     *self._serialize_messages(request_data.messages),

@@ -11,12 +11,30 @@ class CommandRegistry:
     """管理命令元数据、别名和补全候选。"""
 
     def __init__(self, commands: Iterable[CommandDefinition]) -> None:
-        self._commands = tuple(commands)
-        self._by_key: dict[str, CommandDefinition] = {}
+        self._commands, self._by_key = self._build_snapshot(commands)
+
+    def definitions(self) -> tuple[CommandDefinition, ...]:
+        """返回当前完整命令定义快照。"""
+
+        return self._commands
+
+    def replace(self, commands: Iterable[CommandDefinition]) -> None:
+        """原子替换命令定义；校验失败时保留当前快照。"""
+
+        next_commands, next_by_key = self._build_snapshot(commands)
+        self._commands = next_commands
+        self._by_key = next_by_key
+
+    @classmethod
+    def _build_snapshot(
+        cls, commands: Iterable[CommandDefinition]
+    ) -> tuple[tuple[CommandDefinition, ...], dict[str, CommandDefinition]]:
+        command_items = tuple(commands)
+        by_key: dict[str, CommandDefinition] = {}
         owners: dict[str, str] = {}
-        for command in self._commands:
+        for command in command_items:
             keys = (command.name, *command.aliases)
-            normalized_keys = tuple(self._normalize(key) for key in keys)
+            normalized_keys = tuple(cls._normalize(key) for key in keys)
             if not normalized_keys[0]:
                 raise ValueError("命令名称不能为空。")
             for key in normalized_keys:
@@ -26,7 +44,8 @@ class CommandRegistry:
                 if previous is not None:
                     raise ValueError(f"命令键 {key!r} 冲突：{previous} 与 {command.name}")
                 owners[key] = command.name
-                self._by_key[key] = command
+                by_key[key] = command
+        return command_items, by_key
 
     def resolve(self, name: str) -> CommandDefinition | None:
         return self._by_key.get(self._normalize(name))

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from okcode.commands.models import (
     CommandMemorySnapshot,
@@ -55,6 +56,9 @@ from okcode.tools.executor import PreparedToolCall, ToolExecutor
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult, ToolSafety
 from okcode.tools.registry import ToolRegistry
 
+if TYPE_CHECKING:
+    from okcode.skills.runtime import SkillRuntime
+
 
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
@@ -96,6 +100,7 @@ class ConversationSession:
         memory_worker: MemoryWorker | None = None,
         model_name: str = "",
         workspace_root: Path | None = None,
+        skill_runtime: SkillRuntime | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -113,6 +118,7 @@ class ConversationSession:
         self._memory_worker = memory_worker
         self._model_name = model_name
         self._workspace_root = workspace_root or Path.cwd()
+        self._skill_runtime = skill_runtime
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
         self._resumption_notice: str | None = None
@@ -184,6 +190,8 @@ class ConversationSession:
         self._cumulative_input_tokens = 0
         self._cumulative_output_tokens = 0
         self._turn_count = 0
+        if self._skill_runtime is not None:
+            self._skill_runtime.activation_store.clear()
         if self._context_manager is not None:
             self._context_manager.restore_history(())
         return CommandNotice("已结束当前会话并开启新会话。")
@@ -348,7 +356,13 @@ class ConversationSession:
         tool_iterations = 0
         while True:
             yield AgentProgress(f"模型请求 {model_request}", model_request)
-            request = self._build_normal_request(pending, tools, turn_kind, model_request)
+            visible_tools = self._resolve_skill_tools(tools, turn_kind)
+            request = self._build_normal_request(
+                pending,
+                visible_tools,
+                turn_kind,
+                model_request,
+            )
             if (
                 self._context_manager is not None
                 and self._context_manager.needs_automatic_compaction(request)
@@ -358,7 +372,13 @@ class ConversationSession:
                 if stopped is not None:
                     yield stopped
                     return
-                request = self._build_normal_request(pending, tools, turn_kind, model_request)
+                visible_tools = self._resolve_skill_tools(tools, turn_kind)
+                request = self._build_normal_request(
+                    pending,
+                    visible_tools,
+                    turn_kind,
+                    model_request,
+                )
 
             completed: StreamCompleted | None = None
             async for event in self._provider.stream(request):
@@ -473,7 +493,38 @@ class ConversationSession:
             tools=visible_tools,
             prompt=prompt,
             cache=self._cache_policy,
+            model_override=(
+                self._skill_runtime.activation_store.model_override()
+                if self._skill_runtime is not None
+                else None
+            ),
         )
+
+    def _resolve_skill_tools(
+        self,
+        base_tools: Sequence[ToolDefinition],
+        turn_kind: TurnKind,
+    ) -> tuple[ToolDefinition, ...]:
+        """每轮依据最新快照计算模型可见工具，支持同轮按需激活。"""
+
+        runtime = self._skill_runtime
+        if runtime is None:
+            return tuple(base_tools)
+        names = runtime.activation_store.visible_tool_names(
+            tuple(tool.name for tool in base_tools),
+            load_skill_name="load_skill",
+        )
+        if turn_kind is TurnKind.PLAN:
+            names = tuple(
+                name
+                for name in names
+                if name == "load_skill"
+                or (
+                    (tool := self._registry.get(name)) is not None
+                    and tool.definition.safety is ToolSafety.READ_ONLY
+                )
+            )
+        return self._registry.definitions_by_names(names)
 
     async def _compact_recovered_history(self) -> AgentStopped | None:
         """恢复历史超预算时执行且仅执行一次摘要请求。"""

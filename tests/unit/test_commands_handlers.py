@@ -96,7 +96,7 @@ async def _dispatch(command: str, conversation: DummyConversation):
     return await dispatcher.dispatch(command, _context(conversation, registry))
 
 
-def test_default_registry_contains_exactly_twelve_builtin_commands() -> None:
+def test_default_registry_contains_builtin_commands_including_skill() -> None:
     registry = build_default_command_registry()
     expected = {
         "clear": CommandKind.UI,
@@ -110,6 +110,7 @@ def test_default_registry_contains_exactly_twelve_builtin_commands() -> None:
         "resume": CommandKind.UI,
         "review": CommandKind.PROMPT,
         "session": CommandKind.LOCAL,
+        "skill": CommandKind.LOCAL,
         "status": CommandKind.LOCAL,
     }
 
@@ -127,7 +128,7 @@ async def test_help_lists_visible_commands_sorted_by_name() -> None:
     event = result.command_result.events[0]
     assert isinstance(event, CommandHelp)
     assert [entry.name for entry in event.entries] == sorted(entry.name for entry in event.entries)
-    assert len(event.entries) == 12
+    assert len(event.entries) == 13
 
 
 @pytest.mark.asyncio

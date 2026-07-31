@@ -14,6 +14,7 @@ from okcode.commands.handlers import (
     resume_command,
     review_command,
     session_command,
+    skill_command,
     status_command,
 )
 from okcode.commands.models import CommandDefinition, CommandKind
@@ -21,7 +22,7 @@ from okcode.commands.registry import CommandRegistry
 
 
 def build_default_command_registry() -> CommandRegistry:
-    """构造十二条内置命令的注册中心。"""
+    """构造内置命令的注册中心。"""
 
     return CommandRegistry(
         (
@@ -134,6 +135,16 @@ def build_default_command_registry() -> CommandRegistry:
                 None,
                 False,
                 session_command,
+            ),
+            CommandDefinition(
+                "skill",
+                (),
+                "列出可加载和已激活的 Skill。",
+                "/skill",
+                CommandKind.LOCAL,
+                None,
+                False,
+                skill_command,
             ),
             CommandDefinition(
                 "review",

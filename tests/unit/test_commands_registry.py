@@ -69,6 +69,26 @@ def test_completion_candidates_include_aliases_but_exclude_hidden_commands() -> 
     ]
 
 
+def test_replace_updates_all_views_atomically_and_keeps_old_snapshot_on_error() -> None:
+    registry = CommandRegistry((_command("help"), _command("status")))
+    completer = SlashCommandCompleter(registry)
+    event = CompleteEvent(completion_requested=True)
+
+    registry.replace((_command("help"), _command("commit")))
+
+    assert [item.name for item in registry.definitions()] == ["help", "commit"]
+    assert registry.resolve("status") is None
+    assert [item.name for item in registry.visible_commands()] == ["commit", "help"]
+    assert [item.text for item in registry.completion_candidates("co")] == ["/commit"]
+    assert [item.text for item in completer.get_completions(Document("/co"), event)] == ["/commit"]
+
+    with pytest.raises(ValueError, match="冲突"):
+        registry.replace((_command("help"), _command("other", ("HELP",))))
+
+    assert [item.name for item in registry.definitions()] == ["help", "commit"]
+    assert registry.resolve("commit") is not None
+
+
 def test_slash_completer_only_completes_command_name_position() -> None:
     registry = CommandRegistry((_command("help"), _command("status")))
     completer = SlashCommandCompleter(registry)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from okcode import cli
 from okcode.errors import ConfigError
 from okcode.mcp.models import McpConfig, McpDiscoveryResult, McpDiscoveryWarning, McpRemoteToolInfo
@@ -9,7 +11,9 @@ from okcode.permissions.models import PermissionConfirmation, PermissionRequest
 from okcode.prompt import RuntimePromptContextFactory
 from okcode.providers.factory import create_provider
 from okcode.sessions import SessionStore
-from okcode.tools.registry import ToolRegistry
+from okcode.skills.discovery import SkillRoots
+from okcode.tools.defaults import build_default_registry
+from okcode.tools.workspace import Workspace
 
 
 class StubUI:
@@ -141,6 +145,7 @@ def test_main_builds_default_tool_system_from_current_directory(monkeypatch, tmp
     assert [definition.name for definition in conversation._registry.definitions()] == [  # type: ignore[attr-defined]
         "edit_file",
         "find_files",
+        "load_skill",
         "read_file",
         "run_command",
         "search_code",
@@ -219,6 +224,97 @@ def test_invalid_permission_rules_do_not_create_provider(monkeypatch, tmp_path) 
     assert cli.main() == 2
     assert created is False
     assert "permissions.yaml" in ui.config_errors[0]
+
+
+@pytest.mark.parametrize("source", ("project", "user"))
+def test_skill_command_conflict_does_not_create_provider(monkeypatch, tmp_path, source) -> None:
+    ui = StubUI()
+    created = False
+    roots = SkillRoots(tmp_path / "builtin", tmp_path / "user", tmp_path / "project")
+    skills = getattr(roots, source)
+    skills.mkdir(parents=True)
+    review = skills / "review.md"
+    review.write_text(
+        "---\n"
+        "name: review\n"
+        "description: 外部审查\n"
+        "tools: []\n"
+        "mode: shared\n"
+        "history: recent\n"
+        "model: null\n"
+        "---\n\n"
+        "完整 SOP。\n",
+        encoding="utf-8",
+    )
+
+    def unexpected(_: object) -> object:
+        nonlocal created
+        created = True
+        raise AssertionError("Skill 命令冲突时不应创建 Provider")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.SkillRoots, "for_workspace", staticmethod(lambda _: roots))
+    monkeypatch.setattr(cli, "TerminalUI", lambda: ui)
+    monkeypatch.setattr(cli, "load_config", _config)
+    monkeypatch.setattr(cli, "load_mcp_config", lambda _: McpConfig())
+    monkeypatch.setattr(cli, "create_provider", unexpected)
+
+    assert cli.main() == 2
+    assert created is False
+    assert "/review" in ui.config_errors[0]
+    assert str(review) in ui.config_errors[0]
+
+
+def test_same_source_skill_duplicate_does_not_create_provider(monkeypatch, tmp_path) -> None:
+    ui = StubUI()
+    created = False
+    roots = SkillRoots(tmp_path / "builtin", tmp_path / "user", tmp_path / "project")
+    first = roots.project / "same.md"
+    package = roots.project / "package"
+    package.mkdir(parents=True)
+    first.write_text(
+        "---\n"
+        "name: same\n"
+        "description: 第一个\n"
+        "tools: []\n"
+        "mode: shared\n"
+        "history: recent\n"
+        "model: null\n"
+        "---\n\n"
+        "完整 SOP。\n",
+        encoding="utf-8",
+    )
+    second = package / "SKILL.md"
+    second.write_text(
+        "---\n"
+        "name: same\n"
+        "description: 第二个\n"
+        "tools: []\n"
+        "mode: shared\n"
+        "history: recent\n"
+        "model: null\n"
+        "---\n\n"
+        "完整 SOP。\n",
+        encoding="utf-8",
+    )
+
+    def unexpected(_: object) -> object:
+        nonlocal created
+        created = True
+        raise AssertionError("同源重名 Skill 时不应创建 Provider")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.SkillRoots, "for_workspace", staticmethod(lambda _: roots))
+    monkeypatch.setattr(cli, "TerminalUI", lambda: ui)
+    monkeypatch.setattr(cli, "load_config", _config)
+    monkeypatch.setattr(cli, "load_mcp_config", lambda _: McpConfig())
+    monkeypatch.setattr(cli, "create_provider", unexpected)
+
+    assert cli.main() == 2
+    assert created is False
+    assert "同名" in ui.config_errors[0]
+    assert str(first) in ui.config_errors[0]
+    assert str(package) in ui.config_errors[0]
 
 
 def test_main_registers_discovered_mcp_tools_before_loading_permissions(
@@ -310,7 +406,7 @@ def test_main_skips_mcp_tool_that_conflicts_with_existing_registry_entry(
         ),
         Caller(),  # type: ignore[arg-type]
     )
-    registry = ToolRegistry()
+    registry = build_default_registry(Workspace(tmp_path))
     registry.register(tool)
 
     class Manager:
@@ -341,6 +437,8 @@ def test_main_skips_mcp_tool_that_conflicts_with_existing_registry_entry(
     monkeypatch.setattr(cli, "OkCodeApp", App)
 
     assert cli.main() == 0
-    assert [definition.name for definition in registry.definitions()] == ["mcp__server__echo"]
+    names = [definition.name for definition in registry.definitions()]
+    assert names.count("mcp__server__echo") == 1
+    assert "load_skill" in names
     assert ui.mcp_warnings[0].server_name == "server"
     assert ui.mcp_warnings[0].phase == "工具注册"
