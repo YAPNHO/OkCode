@@ -11,13 +11,22 @@ from rich.console import Console
 from rich.rule import Rule
 from rich.table import Table
 
+from okcode.commands.completion import SlashCommandCompleter
+from okcode.commands.models import RuntimeMode
+from okcode.commands.registry import CommandRegistry
 from okcode.errors import ProviderError
 from okcode.mcp.models import McpDiscoveryWarning
 from okcode.models import (
     AgentProgress,
     AgentStopped,
+    CommandHelp,
+    CommandMemory,
+    CommandNotice,
+    CommandSession,
+    CommandStatus,
     PermissionStatus,
     ProviderConfig,
+    RuntimeModeChanged,
     TextDelta,
     ThinkingDelta,
     TokenUsageReported,
@@ -42,6 +51,8 @@ class TerminalUI:
         self._session = session
         self._seen_sections: set[str] = set()
         self._turn_open = False
+        self._command_registry: CommandRegistry | None = None
+        self._runtime_mode = RuntimeMode.DEFAULT
 
     def prompt(self) -> str | None:
         """读取一轮输入；EOF 表示退出。"""
@@ -50,7 +61,7 @@ class TerminalUI:
             try:
                 session = self._session
                 if session is None:
-                    session = PromptSession(history=InMemoryHistory())
+                    session = self._new_prompt_session()
                     self._session = session
                 return session.prompt("你 > ")
             except KeyboardInterrupt:
@@ -97,7 +108,7 @@ class TerminalUI:
             try:
                 session = self._session
                 if session is None:
-                    session = PromptSession(history=InMemoryHistory())
+                    session = self._new_prompt_session()
                     self._session = session
                 choice = session.prompt(
                     "\u6062\u590d\u7f16\u53f7\uff08\u56de\u8f66\u6216 /cancel \u53d6\u6d88\uff09> "
@@ -133,7 +144,7 @@ class TerminalUI:
         try:
             session = self._session
             if session is None:
-                session = PromptSession(history=InMemoryHistory())
+                session = self._new_prompt_session()
                 self._session = session
             choice = (await session.prompt_async("权限 > ")).strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -174,6 +185,31 @@ class TerminalUI:
             self._render_agent_stopped(event)
         elif isinstance(event, PermissionStatus):
             self._render_permission_status(event)
+        elif isinstance(event, CommandNotice):
+            self._render_command_notice(event)
+        elif isinstance(event, CommandHelp):
+            self._render_command_help(event)
+        elif isinstance(event, CommandStatus):
+            self._render_command_status(event)
+        elif isinstance(event, CommandMemory):
+            self._render_command_memory(event)
+        elif isinstance(event, CommandSession):
+            self._render_command_session(event)
+        elif isinstance(event, RuntimeModeChanged):
+            self._render_runtime_mode_changed(event)
+
+    def set_command_registry(self, registry: CommandRegistry) -> None:
+        self._command_registry = registry
+        if self._session is None:
+            return
+
+    def set_runtime_mode(self, mode: RuntimeMode) -> None:
+        self._runtime_mode = mode
+
+    def clear_screen(self) -> None:
+        self._finish_line()
+        self._console.clear()
+        self._reset_turn()
 
     def finish_turn(self) -> None:
         thinking_closed = self._close_thinking_section()
@@ -328,6 +364,62 @@ class TerminalUI:
             self._console.print(f"权限：{event.message}", style="yellow")
         self._turn_open = True
 
+    def _render_command_notice(self, event: CommandNotice) -> None:
+        self._finish_line()
+        style = "yellow" if event.level.value != "info" else "dim"
+        self._console.print(f"命令：{event.message}", style=style)
+        self._turn_open = True
+
+    def _render_command_help(self, event: CommandHelp) -> None:
+        self._finish_line()
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("命令", no_wrap=True)
+        table.add_column("描述")
+        for entry in event.entries:
+            table.add_row("/" + entry.name, entry.description)
+        self._console.print(table)
+        self._turn_open = True
+
+    def _render_command_status(self, event: CommandStatus) -> None:
+        self._finish_line()
+        table = Table(show_header=False)
+        table.add_column("字段", no_wrap=True)
+        table.add_column("值")
+        table.add_row("当前权限模式", event.permission_mode)
+        table.add_row(
+            "累计 Token",
+            f"输入 {event.cumulative_input_tokens} / 输出 {event.cumulative_output_tokens}",
+        )
+        table.add_row("可用工具数量", str(event.available_tool_count))
+        table.add_row("已加载记忆条目数", str(event.loaded_memory_item_count))
+        table.add_row("当前模型名", event.model_name)
+        table.add_row("当前工作目录", event.working_directory)
+        self._console.print(table)
+        self._turn_open = True
+
+    def _render_command_memory(self, event: CommandMemory) -> None:
+        self._finish_line()
+        project = ", ".join(event.project_memory_files) or "（无）"
+        user = ", ".join(event.user_memory_files) or "（无）"
+        self._console.print(f"项目记忆：{project}", style="dim")
+        self._console.print(f"用户记忆：{user}", style="dim")
+        self._turn_open = True
+
+    def _render_command_session(self, event: CommandSession) -> None:
+        self._finish_line()
+        self._console.print(f"会话 ID：{event.session_id or '（未启用）'}", style="dim")
+        self._console.print(f"存档文件：{event.journal_path or '（未启用）'}", style="dim")
+        self._turn_open = True
+
+    def _render_runtime_mode_changed(self, event: RuntimeModeChanged) -> None:
+        self._finish_line()
+        try:
+            self._runtime_mode = RuntimeMode(event.mode)
+        except ValueError:
+            pass
+        self._console.print(f"模式：{event.message}", style="dim")
+        self._turn_open = True
+
     def _close_thinking_section(self) -> bool:
         if "thinking" in self._seen_sections and "thinking_closed" not in self._seen_sections:
             self._console.print("]", end="", style="bright_green")
@@ -341,3 +433,15 @@ class TerminalUI:
         flush = getattr(file, "flush", None)
         if callable(flush):
             flush()
+
+    def _new_prompt_session(self) -> PromptSession:
+        kwargs = {
+            "history": InMemoryHistory(),
+            "bottom_toolbar": self._bottom_toolbar,
+        }
+        if self._command_registry is not None:
+            kwargs["completer"] = SlashCommandCompleter(self._command_registry)
+        return PromptSession(**kwargs)
+
+    def _bottom_toolbar(self) -> str:
+        return self._runtime_mode.marker

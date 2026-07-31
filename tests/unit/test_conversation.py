@@ -26,6 +26,7 @@ from okcode.models import (
     AgentStopped,
     AgentStopReason,
     ChatMessage,
+    CommandNotice,
     Role,
     StreamCompleted,
     TextDelta,
@@ -753,6 +754,36 @@ async def test_three_summary_failures_open_circuit_without_changing_history(tmp_
             "上下文摘要连续失败 3 次，当前会话已熔断，不再发起摘要请求。",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_reset_session_closes_old_journal_and_clears_in_memory_state(tmp_path: Path) -> None:
+    tokens = iter(("abcd", "bcde"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: datetime(2026, 7, 30, 10, 0, tzinfo=UTC),
+        token_factory=lambda: next(tokens),
+    )
+    provider = FakeProvider(
+        [StreamCompleted(ChatMessage(Role.ASSISTANT, "done"), TokenUsage(3, 4))]
+    )
+    session = _session(provider, session_store=store)
+    old_journal = session._session_journal  # type: ignore[attr-defined]
+
+    _ = [event async for event in session.stream_turn("question")]
+    notice = session.reset_session()
+    new_journal = session._session_journal  # type: ignore[attr-defined]
+
+    assert isinstance(notice, CommandNotice)
+    assert session.messages == ()
+    assert session.saved_plan is None
+    assert session.status_snapshot().cumulative_input_tokens == 0
+    assert session.status_snapshot().cumulative_output_tokens == 0
+    assert old_journal is not None
+    assert new_journal is not None
+    assert old_journal.path != new_journal.path
+    with pytest.raises(OSError):
+        old_journal.append((ChatMessage(Role.USER, "late write"),))
 
 
 @pytest.mark.asyncio

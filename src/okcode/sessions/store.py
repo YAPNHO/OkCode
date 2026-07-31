@@ -24,10 +24,18 @@ class SessionJournal:
         self.session_id = session_id
         self.path = path
         self._clock = clock
+        self._closed = False
+
+    def close(self) -> None:
+        """停止继续使用当前追加器。"""
+
+        self._closed = True
 
     def append(self, messages: Sequence[ChatMessage]) -> None:
         """在首次成功提交后逐行追加完整消息。"""
 
+        if self._closed:
+            raise OSError("会话存档已关闭。")
         if not messages:
             return
         timestamp = _as_utc(self._clock())

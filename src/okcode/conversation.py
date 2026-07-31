@@ -10,19 +10,29 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
+from okcode.commands.models import (
+    CommandMemorySnapshot,
+    CommandSessionSnapshot,
+    CommandStatusSnapshot,
+    RuntimeMode,
+    ToolScope,
+)
 from okcode.context import ContextManager, SummaryPlan, SummaryRequestFactory
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.memory.models import MemoryJob
+from okcode.memory.store import MemoryStore
 from okcode.memory.worker import MemoryWorker
 from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
     ChatMessage,
+    CommandNotice,
     PermissionStatus,
     ProviderRequest,
     Role,
     StreamCompleted,
+    TokenUsage,
     TokenUsageReported,
     ToolCall,
     ToolCallRequested,
@@ -82,7 +92,10 @@ class ConversationSession:
         summary_factory: SummaryRequestFactory | None = None,
         session_journal: SessionJournal | None = None,
         session_store: SessionStore | None = None,
+        memory_store: MemoryStore | None = None,
         memory_worker: MemoryWorker | None = None,
+        model_name: str = "",
+        workspace_root: Path | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -96,10 +109,17 @@ class ConversationSession:
         self._summary_factory = summary_factory or SummaryRequestFactory()
         self._session_journal = session_journal
         self._session_store = session_store
+        self._memory_store = memory_store
         self._memory_worker = memory_worker
+        self._model_name = model_name
+        self._workspace_root = workspace_root or Path.cwd()
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
         self._resumption_notice: str | None = None
+        self._runtime_mode = RuntimeMode.DEFAULT
+        self._cumulative_input_tokens = 0
+        self._cumulative_output_tokens = 0
+        self._turn_count = 0
 
     @property
     def messages(self) -> tuple[ChatMessage, ...]:
@@ -114,6 +134,59 @@ class ConversationSession:
         if self._permissions is None:
             return "default"
         return self._permissions.mode.value
+
+    @property
+    def runtime_mode(self) -> RuntimeMode:
+        return self._runtime_mode
+
+    def set_runtime_mode(self, mode: RuntimeMode) -> None:
+        self._runtime_mode = mode
+
+    def permission_string(self) -> str:
+        return self._runtime_mode.value
+
+    def session_snapshot(self) -> CommandSessionSnapshot:
+        if self._session_journal is None:
+            return CommandSessionSnapshot("", "")
+        return CommandSessionSnapshot(
+            self._session_journal.session_id,
+            str(self._session_journal.path),
+        )
+
+    def memory_snapshot(self) -> CommandMemorySnapshot:
+        if self._memory_store is None:
+            return CommandMemorySnapshot((), ())
+        return CommandMemorySnapshot(
+            _memory_file_names(self._memory_store.paths.project_root),
+            _memory_file_names(self._memory_store.paths.user_root),
+        )
+
+    def status_snapshot(self) -> CommandStatusSnapshot:
+        memory = self.memory_snapshot()
+        return CommandStatusSnapshot(
+            self.permission_string(),
+            self._cumulative_input_tokens,
+            self._cumulative_output_tokens,
+            len(self._registry.definitions()),
+            len(memory.project_memory_files) + len(memory.user_memory_files),
+            self._model_name,
+            str(self._workspace_root),
+        )
+
+    def reset_session(self) -> CommandNotice:
+        if self._session_journal is not None:
+            self._session_journal.close()
+        if self._session_store is not None:
+            self._session_journal = self._session_store.create_journal()
+        self._messages = ()
+        self._saved_plan = None
+        self._resumption_notice = None
+        self._cumulative_input_tokens = 0
+        self._cumulative_output_tokens = 0
+        self._turn_count = 0
+        if self._context_manager is not None:
+            self._context_manager.restore_history(())
+        return CommandNotice("已结束当前会话并开启新会话。")
 
     def list_resumable_sessions(self) -> tuple[SessionDescriptor, ...]:
         """返回当前项目可由 `/resume` 选择的会话摘要。"""
@@ -174,61 +247,88 @@ class ConversationSession:
         yield AgentProgress("会话历史已恢复。")
 
     async def stream_turn(self, user_text: str) -> AsyncIterator[TurnEvent]:
-        """流式执行一轮，并只在完整成功后提交历史。"""
+        """兼容旧调用方：把文本当作普通用户消息执行。"""
 
         stripped = user_text.strip()
-        if stripped == "/permissions" or stripped.startswith("/permissions "):
+        if not stripped:
+            return
+        command, _, args = stripped.partition(" ")
+        command = command.lower()
+        if command == "/plan":
+            async for event in self.stream_user_message(
+                args.lstrip(),
+                mode=RuntimeMode.PLAN,
+                tool_scope=ToolScope.READ_ONLY,
+            ):
+                yield event
+            return
+        if command == "/do":
+            async for event in self.stream_do_instruction():
+                yield event
+            return
+        if command == "/compact":
+            async for event in self.stream_manual_compaction():
+                yield event
+            return
+        if command == "/permissions":
             async for event in self._handle_permissions_command(stripped):
                 yield event
             return
-        if stripped == "/compact":
-            async for event in self._handle_compact_command():
-                yield event
-            return
-        if stripped.startswith("/plan"):
-            task = stripped.removeprefix("/plan").strip()
-            if not task:
-                yield AgentStopped(
-                    AgentStopReason.NO_SAVED_PLAN,
-                    "请在 /plan 后写明要规划的任务。",
-                )
-                return
-            user_message = ChatMessage(role=Role.USER, content=task)
+        async for event in self.stream_user_message(user_text):
+            yield event
+
+    async def stream_user_message(
+        self,
+        user_text: str,
+        *,
+        mode: RuntimeMode | None = None,
+        tool_scope: ToolScope | None = None,
+    ) -> AsyncIterator[TurnEvent]:
+        """按当前或指定运行时模式执行一轮普通用户消息。"""
+
+        actual_mode = mode or self._runtime_mode
+        actual_scope = tool_scope or ToolScope.CURRENT_MODE
+        if actual_scope is ToolScope.READ_ONLY or (
+            actual_scope is ToolScope.CURRENT_MODE and actual_mode is RuntimeMode.PLAN
+        ):
             tools = self._registry.definitions_by_safety(ToolSafety.READ_ONLY)
-            async for event in self._run_agent(
-                user_message,
-                tools,
-                save_plan_task=task,
-                turn_kind=TurnKind.PLAN,
-            ):
-                yield event
-            return
-
-        if stripped == "/do":
-            if self._saved_plan is None:
-                yield AgentStopped(
-                    AgentStopReason.NO_SAVED_PLAN,
-                    "没有可执行的计划，请先使用 /plan 生成计划。",
-                )
-                return
-            user_message = ChatMessage(
-                role=Role.USER,
-                content="请执行当前会话最近一次计划：\n" + self._saved_plan.content,
-            )
-            async for event in self._run_agent(
-                user_message,
-                self._registry.definitions(),
-                turn_kind=TurnKind.DO,
-            ):
-                yield event
-            return
-
+        else:
+            tools = self._registry.definitions()
+        turn_kind = TurnKind.PLAN if actual_mode is RuntimeMode.PLAN else TurnKind.NORMAL
+        save_plan_task = user_text if actual_mode is RuntimeMode.PLAN else None
         user_message = ChatMessage(role=Role.USER, content=user_text)
         async for event in self._run_agent(
             user_message,
-            self._registry.definitions(),
-            turn_kind=TurnKind.NORMAL,
+            tools,
+            save_plan_task=save_plan_task,
+            turn_kind=turn_kind,
         ):
+            yield event
+
+    async def stream_do_instruction(self) -> AsyncIterator[TurnEvent]:
+        """执行本阶段前 /do 的外部行为。"""
+
+        if self._saved_plan is None:
+            yield AgentStopped(
+                AgentStopReason.NO_SAVED_PLAN,
+                "没有可执行的计划，请先使用 /plan 生成计划。",
+            )
+            return
+        user_message = ChatMessage(
+            role=Role.USER,
+            content="请执行当前会话最近一次计划：\n" + self._saved_plan.content,
+        )
+        async for event in self._run_agent(
+            user_message,
+            self._registry.definitions(),
+            turn_kind=TurnKind.DO,
+        ):
+            yield event
+
+    async def stream_manual_compaction(self) -> AsyncIterator[TurnEvent]:
+        """无条件执行一次手动摘要，不进入普通 Agent Loop。"""
+
+        async for event in self._handle_compact_command():
             yield event
 
     async def _run_agent(
@@ -274,6 +374,7 @@ class ConversationSession:
                 raise ProviderError(ProviderErrorKind.STREAM, "模型流没有正常结束。")
             if self._context_manager is not None:
                 self._context_manager.record_normal_usage(request, completed.usage)
+            self._record_token_usage(completed.usage)
             yield TokenUsageReported(completed.usage, model_request)
 
             assistant_message = completed.message
@@ -285,6 +386,7 @@ class ConversationSession:
                 if not assistant_message.content.strip():
                     raise ProviderError(ProviderErrorKind.STREAM, "模型未返回可显示的正式回答。")
                 self._messages = (*self._messages, *pending)
+                self._turn_count += 1
                 if save_plan_task is not None:
                     self._saved_plan = SavedPlan(save_plan_task, assistant_message.content)
                 if self._session_journal is not None:
@@ -392,6 +494,12 @@ class ConversationSession:
         if store is None or not store.is_long_gap(updated_at):
             return None
         return "该恢复会话与上次活动相隔较久，请先确认当前文件和任务状态，不要假设前一轮仍在执行。"
+
+    def _record_token_usage(self, usage: TokenUsage) -> None:
+        if usage.input_tokens is not None:
+            self._cumulative_input_tokens += usage.input_tokens
+        if usage.output_tokens is not None:
+            self._cumulative_output_tokens += usage.output_tokens
 
     async def _handle_compact_command(self) -> AsyncIterator[TurnEvent]:
         """无条件执行一次手动摘要，不进入普通 Agent Loop。"""
@@ -569,3 +677,9 @@ def _default_context_factory(
         turn_kind=turn_kind,
         iteration=iteration,
     )
+
+
+def _memory_file_names(root: Path) -> tuple[str, ...]:
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(path.name for path in root.glob("*.md") if path.is_file()))

@@ -1,0 +1,149 @@
+"""默认内置斜杠命令。"""
+
+from __future__ import annotations
+
+from okcode.commands.handlers import (
+    clear_command,
+    compact_command,
+    do_command,
+    exit_command,
+    help_command,
+    memory_command,
+    permission_command,
+    plan_command,
+    resume_command,
+    review_command,
+    session_command,
+    status_command,
+)
+from okcode.commands.models import CommandDefinition, CommandKind
+from okcode.commands.registry import CommandRegistry
+
+
+def build_default_command_registry() -> CommandRegistry:
+    """构造十二条内置命令的注册中心。"""
+
+    return CommandRegistry(
+        (
+            CommandDefinition(
+                "exit",
+                (),
+                "关闭 TUI 进程。",
+                "/exit",
+                CommandKind.UI,
+                None,
+                False,
+                exit_command,
+            ),
+            CommandDefinition(
+                "plan",
+                (),
+                "切换到计划模式。",
+                "/plan",
+                CommandKind.UI,
+                None,
+                False,
+                plan_command,
+            ),
+            CommandDefinition(
+                "do",
+                (),
+                "执行当前会话最近一次计划。",
+                "/do",
+                CommandKind.PROMPT,
+                None,
+                False,
+                do_command,
+            ),
+            CommandDefinition(
+                "compact",
+                (),
+                "手动压缩当前上下文。",
+                "/compact",
+                CommandKind.UI,
+                None,
+                False,
+                compact_command,
+            ),
+            CommandDefinition(
+                "resume",
+                (),
+                "恢复一个历史会话。",
+                "/resume",
+                CommandKind.UI,
+                None,
+                False,
+                resume_command,
+            ),
+            CommandDefinition(
+                "clear",
+                (),
+                "结束当前会话并开启新会话。",
+                "/clear",
+                CommandKind.UI,
+                None,
+                False,
+                clear_command,
+            ),
+            CommandDefinition(
+                "help",
+                (),
+                "显示可用命令。",
+                "/help",
+                CommandKind.LOCAL,
+                None,
+                False,
+                help_command,
+            ),
+            CommandDefinition(
+                "status",
+                (),
+                "显示当前运行状态。",
+                "/status",
+                CommandKind.LOCAL,
+                None,
+                False,
+                status_command,
+            ),
+            CommandDefinition(
+                "memory",
+                (),
+                "列出已加载记忆文件。",
+                "/memory",
+                CommandKind.LOCAL,
+                None,
+                False,
+                memory_command,
+            ),
+            CommandDefinition(
+                "permission",
+                (),
+                "显示当前运行时模式。",
+                "/permission",
+                CommandKind.LOCAL,
+                None,
+                False,
+                permission_command,
+            ),
+            CommandDefinition(
+                "session",
+                (),
+                "显示当前会话标识。",
+                "/session",
+                CommandKind.LOCAL,
+                None,
+                False,
+                session_command,
+            ),
+            CommandDefinition(
+                "review",
+                (),
+                "请求代码审查。",
+                "/review",
+                CommandKind.PROMPT,
+                None,
+                False,
+                review_command,
+            ),
+        )
+    )

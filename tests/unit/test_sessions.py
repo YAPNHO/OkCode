@@ -58,6 +58,15 @@ def test_journal_appends_each_message_as_valid_jsonl(tmp_path: Path) -> None:
     assert [decode_record(row).message for row in rows] == list(messages)
 
 
+def test_closed_journal_rejects_future_appends(tmp_path: Path) -> None:
+    journal = _store(tmp_path).create_journal()
+
+    journal.close()
+
+    with pytest.raises(OSError):
+        journal.append((ChatMessage(Role.USER, "question"),))
+
+
 def test_codec_round_trips_anthropic_provider_state_and_tool_messages() -> None:
     call = ToolCall("call-1", "read_file", '{"path":"a.py"}')
     messages = (

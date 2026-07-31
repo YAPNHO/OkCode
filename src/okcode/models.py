@@ -219,6 +219,74 @@ class PermissionStatus:
     message: str | None = None
 
 
+class CommandNoticeLevel(StrEnum):
+    """命令提示的可见级别。"""
+
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandNotice:
+    """命令产生的普通提示。"""
+
+    message: str
+    level: CommandNoticeLevel = CommandNoticeLevel.INFO
+
+
+@dataclass(frozen=True, slots=True)
+class CommandHelpEntry:
+    """帮助列表中的一行。"""
+
+    name: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandHelp:
+    """命令帮助列表。"""
+
+    entries: tuple[CommandHelpEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CommandStatus:
+    """/status 的固定六项状态。"""
+
+    permission_mode: str
+    cumulative_input_tokens: int
+    cumulative_output_tokens: int
+    available_tool_count: int
+    loaded_memory_item_count: int
+    model_name: str
+    working_directory: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandMemory:
+    """/memory 的记忆文件名列表。"""
+
+    project_memory_files: tuple[str, ...]
+    user_memory_files: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSession:
+    """/session 的当前会话标识。"""
+
+    session_id: str
+    journal_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModeChanged:
+    """运行时模式切换提示。"""
+
+    mode: str
+    message: str
+
+
 type VisibleDelta = ThinkingDelta | TextDelta
 type StreamEvent = ThinkingDelta | TextDelta | StreamCompleted
 type TurnEvent = (
@@ -231,4 +299,10 @@ type TurnEvent = (
     | TokenUsageReported
     | AgentStopped
     | PermissionStatus
+    | CommandNotice
+    | CommandHelp
+    | CommandStatus
+    | CommandMemory
+    | CommandSession
+    | RuntimeModeChanged
 )

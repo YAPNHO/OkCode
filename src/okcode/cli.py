@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from okcode.app import OkCodeApp
+from okcode.commands import build_default_command_registry
 from okcode.config import load_config
 from okcode.context import ArtifactStore, ContextManager
 from okcode.conversation import ConversationSession
@@ -47,6 +48,7 @@ def main() -> int:
             InstructionPaths.for_workspace(workspace.root), workspace.root
         ).load()
         memory_store = MemoryStore(MemoryPaths.for_workspace(workspace.root))
+        command_registry = build_default_command_registry()
         memory_worker = MemoryWorker(
             lambda: create_provider(config.active_provider),
             memory_store,
@@ -92,11 +94,17 @@ def main() -> int:
             ),
             session_store=session_store,
             session_journal=session_store.create_journal(),
+            memory_store=memory_store,
             memory_worker=memory_worker,
+            model_name=config.active_provider.model,
+            workspace_root=workspace.root,
         )
+        set_command_registry = getattr(ui, "set_command_registry", None)
+        if callable(set_command_registry):
+            set_command_registry(command_registry)
         for warning in warnings:
             ui.show_mcp_warning(warning)
-        app = OkCodeApp(ui, conversation, runner, config.active_provider)
+        app = OkCodeApp(ui, conversation, runner, config.active_provider, command_registry)
         return app.run()
     except ConfigError as error:
         ui.show_config_error(str(error))
