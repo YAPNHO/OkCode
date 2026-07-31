@@ -5,6 +5,7 @@ from collections.abc import Mapping
 
 import pytest
 
+from okcode.hooks.models import HookContext, HookEvent, HookInterception
 from okcode.models import ToolCall
 from okcode.permissions.manager import PermissionManager
 from okcode.permissions.models import PermissionConfirmation, PermissionMode
@@ -77,6 +78,18 @@ class CommandTool:
     async def execute(self, arguments: Mapping[str, JSONValue]) -> ToolOutput:
         self.calls += 1
         return ToolOutput("命令成功", {"command": arguments["command"]})
+
+
+class RecordingHooks:
+    def __init__(self, interception: HookInterception | None = None) -> None:
+        self.interception = interception
+        self.contexts: list[HookContext] = []
+
+    async def dispatch(self, context: HookContext) -> HookInterception | None:
+        self.contexts.append(context)
+        if context.event is HookEvent.TOOL_BEFORE:
+            return self.interception
+        return None
 
 
 def _executor(tool: ControlledTool, **limits: int) -> ToolExecutor:
@@ -191,3 +204,40 @@ async def test_executor_waits_for_async_permission_confirmation(tmp_path) -> Non
     result = await task
     assert result.success is True
     assert tool.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_hook_before_rejection_happens_before_tool_execution() -> None:
+    tool = CommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    hooks = RecordingHooks(HookInterception("Hook 拒绝写入。", "guard"))
+    executor = ToolExecutor(registry, hooks=hooks)  # type: ignore[arg-type]
+
+    result = await executor.execute(ToolCall("call", "run_command", '{"command":"echo hi"}'))
+
+    assert result.error_code is ToolErrorCode.PERMISSION_DENIED
+    assert result.data["hook_rule"] == "guard"
+    assert result.data["hook_event"] == "tool.before"
+    assert result.data["executed"] is False
+    assert tool.calls == 0
+    assert hooks.contexts[0].values["tool.arguments.command"] == "echo hi"
+
+
+@pytest.mark.asyncio
+async def test_hook_after_runs_after_result_is_created() -> None:
+    tool = CommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    hooks = RecordingHooks()
+    executor = ToolExecutor(registry, hooks=hooks)  # type: ignore[arg-type]
+
+    result = await executor.execute(ToolCall("call", "run_command", '{"command":"echo hi"}'))
+
+    assert result.success is True
+    assert tool.calls == 1
+    assert [context.event for context in hooks.contexts] == [
+        HookEvent.TOOL_BEFORE,
+        HookEvent.TOOL_AFTER,
+    ]
+    assert hooks.contexts[1].values["tool.result.success"] is True

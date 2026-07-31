@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from fnmatch import fnmatchcase
 
+from okcode.matching import MatchExpression, parse_match_expression
 from okcode.models import ToolCall
 from okcode.tools.models import JSONValue, PermissionTargetKind, ToolDefinition, ToolErrorCode
 
@@ -54,8 +54,16 @@ class PermissionRule:
     """一个工具名及可选目标模式组成的权限规则。"""
 
     tool_name: str
-    pattern: str | None
+    pattern: MatchExpression | str | None
     action: RuleAction
+
+    def __post_init__(self) -> None:
+        if isinstance(self.pattern, str):
+            object.__setattr__(
+                self,
+                "pattern",
+                parse_match_expression(self.pattern, "match 模式"),
+            )
 
     def matches(self, request: PermissionRequest) -> bool:
         if self.tool_name != request.call.name:
@@ -65,16 +73,23 @@ class PermissionRule:
         if request.target is None:
             return False
         pattern = self.pattern
+        assert isinstance(pattern, MatchExpression)
         target = request.target
         if request.target_kind is PermissionTargetKind.PATH:
-            pattern = pattern.replace("\\", "/").casefold()
-            target = target.casefold()
-        return fnmatchcase(target, pattern)
+            target = target.replace("\\", "/").casefold()
+            expression = MatchExpression(
+                pattern.kind,
+                pattern.pattern.replace("\\", "/").casefold(),
+                pattern.negated,
+            )
+        else:
+            expression = pattern
+        return expression.matches(target)
 
     def to_text(self) -> str:
         if self.pattern is None:
             return self.tool_name
-        return f"{self.tool_name}({self.pattern})"
+        return f"{self.tool_name}({self.pattern.to_text()})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +122,7 @@ class PermissionDecision:
     error_code: ToolErrorCode = ToolErrorCode.PERMISSION_DENIED
 
 
-def parse_rule_text(text: object, known_tool_names: set[str]) -> tuple[str, str | None]:
+def parse_rule_text(text: object, known_tool_names: set[str]) -> tuple[str, MatchExpression | None]:
     """解析 ``工具名`` 或 ``工具名(模式)``，并兼容 Bash 命令工具别名。"""
 
     if not isinstance(text, str) or not text.strip():
@@ -115,7 +130,7 @@ def parse_rule_text(text: object, known_tool_names: set[str]) -> tuple[str, str 
     value = text.strip()
     if "(" not in value and ")" not in value:
         tool_name = value
-        pattern = None
+        expression = None
     else:
         if value.count("(") != 1 or value.count(")") != 1 or not value.endswith(")"):
             raise ValueError("match 必须是 工具名 或 工具名(模式)。")
@@ -126,24 +141,12 @@ def parse_rule_text(text: object, known_tool_names: set[str]) -> tuple[str, str 
             raise ValueError("match 中的工具名和模式都不能为空。")
         if "(" in pattern or ")" in pattern:
             raise ValueError("match 模式不能包含括号。")
-        _validate_glob_pattern(pattern)
+        try:
+            expression = parse_match_expression(pattern, "match 模式")
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
     if tool_name == "Bash":
         tool_name = "run_command"
     if tool_name not in known_tool_names:
         raise ValueError(f"未知工具：{tool_name}")
-    return tool_name, pattern
-
-
-def _validate_glob_pattern(pattern: str) -> None:
-    """拒绝未闭合的 glob 字符类，避免配置错误退化为字面量匹配。"""
-
-    class_open = False
-    for character in pattern:
-        if character == "[":
-            if class_open:
-                raise ValueError("match 的 glob 字符类无效。")
-            class_open = True
-        elif character == "]" and class_open:
-            class_open = False
-    if class_open:
-        raise ValueError("match 的 glob 字符类未闭合。")
+    return tool_name, expression

@@ -7,6 +7,9 @@ from pathlib import Path
 from okcode.app import OkCodeApp
 from okcode.conversation import ConversationSession
 from okcode.errors import ExitRequested, ProviderError, ProviderErrorKind
+from okcode.hooks.actions import HookActionOutcome
+from okcode.hooks.models import HookContext, HookControl, HookEvent, HookRule, ShellHookAction
+from okcode.hooks.runtime import HookRuntime
 from okcode.models import (
     AgentProgress,
     ChatMessage,
@@ -33,16 +36,48 @@ def _config() -> ProviderConfig:
 
 
 def _conversation(
-    provider: FakeProvider, *, session_store: SessionStore | None = None
+    provider: FakeProvider,
+    *,
+    session_store: SessionStore | None = None,
+    hooks: HookRuntime | None = None,
 ) -> ConversationSession:
     registry = ToolRegistry()
     return ConversationSession(
         provider,
         registry,
-        ToolExecutor(registry),
+        ToolExecutor(registry, hooks=hooks),
         session_store=session_store,
         session_journal=session_store.create_journal() if session_store is not None else None,
+        hooks=hooks,
     )
+
+
+class RecordingHookRunner:
+    def __init__(self) -> None:
+        self.contexts: list[HookContext] = []
+
+    async def run(self, rule: HookRule, context: HookContext) -> HookActionOutcome:
+        self.contexts.append(context)
+        return HookActionOutcome("ok")
+
+
+def _hook_runtime(*events: HookEvent) -> tuple[HookRuntime, RecordingHookRunner]:
+    runner = RecordingHookRunner()
+    runtime = HookRuntime(
+        tuple(
+            HookRule(
+                event.value,
+                event,
+                None,
+                ShellHookAction("echo ok"),
+                HookControl(),
+            )
+            for event in events
+        ),
+        runner=runner,  # type: ignore[arg-type]
+        config_path="D:/repo/.okcode/hooks.yaml",
+    )
+    return runtime, runner
 
 
 def test_successful_turn_and_exit() -> None:
@@ -60,6 +95,53 @@ def test_successful_turn_and_exit() -> None:
     assert ui.deltas[0] == AgentProgress("模型请求 1", 1)
     assert TextDelta("回答") in ui.deltas
     assert ui.finished == 1
+    assert ui.goodbyes == 1
+
+
+def test_app_dispatches_session_start_and_end_once() -> None:
+    provider = FakeProvider([])
+    hooks, hook_runner = _hook_runtime(HookEvent.SESSION_START, HookEvent.SESSION_END)
+    ui = FakeTerminal(["/exit"])
+    runner = asyncio.Runner()
+    try:
+        app = OkCodeApp(ui, _conversation(provider, hooks=hooks), runner, _config(), hooks=hooks)
+        assert app.run() == 0
+    finally:
+        runner.close()
+
+    assert [context.event for context in hook_runner.contexts] == [
+        HookEvent.SESSION_START,
+        HookEvent.SESSION_END,
+    ]
+    assert hook_runner.contexts[0].values["runtime.mode"] == "default"
+    assert hook_runner.contexts[1].values["session.turn_count"] == 0
+    assert ui.goodbyes == 1
+
+
+def test_app_dispatches_system_error_and_later_session_end() -> None:
+    provider = FakeProvider([ProviderError(ProviderErrorKind.BAD_REQUEST, "请求错误")])
+    hooks, hook_runner = _hook_runtime(
+        HookEvent.SESSION_START,
+        HookEvent.ERROR,
+        HookEvent.SESSION_END,
+    )
+    ui = FakeTerminal(["问题", "/exit"])
+    runner = asyncio.Runner()
+    try:
+        app = OkCodeApp(ui, _conversation(provider, hooks=hooks), runner, _config(), hooks=hooks)
+        assert app.run() == 0
+    finally:
+        runner.close()
+
+    assert [context.event for context in hook_runner.contexts] == [
+        HookEvent.SESSION_START,
+        HookEvent.ERROR,
+        HookEvent.SESSION_END,
+    ]
+    assert hook_runner.contexts[1].values == {
+        "error.category": "bad_request",
+        "error.message": "请求错误",
+    }
     assert ui.goodbyes == 1
 
 

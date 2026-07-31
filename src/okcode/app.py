@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -16,8 +17,12 @@ from okcode.commands import (
 )
 from okcode.conversation import ConversationSession
 from okcode.errors import ExitRequested, ProviderError
+from okcode.hooks.models import HookContext, HookEvent
+from okcode.hooks.runtime import HookRuntime
 from okcode.models import ProviderConfig, TurnEvent
 from okcode.terminal import TerminalUI
+
+_LOG = logging.getLogger(__name__)
 
 
 class OkCodeApp:
@@ -31,6 +36,7 @@ class OkCodeApp:
         config: ProviderConfig,
         command_registry: CommandRegistry | None = None,
         skill_runtime: object | None = None,
+        hooks: HookRuntime | None = None,
     ) -> None:
         self._ui = ui
         self._conversation = conversation
@@ -38,6 +44,8 @@ class OkCodeApp:
         self._config = config
         self._command_registry = command_registry or build_default_command_registry()
         self._skill_runtime = skill_runtime
+        self._hooks = hooks
+        self._session_closed = False
         self._dispatcher = CommandDispatcher(self._command_registry)
         set_registry = getattr(self._ui, "set_command_registry", None)
         if callable(set_registry):
@@ -45,28 +53,35 @@ class OkCodeApp:
 
     def run(self) -> int:
         self._sync_runtime_mode()
+        self._dispatch_session_start()
         self._ui.show_welcome(self._config, self._conversation.permission_mode)
         while True:
             text = self._ui.prompt()
             if text is None:
+                self._dispatch_session_end()
                 self._ui.show_goodbye()
                 return 0
             if self._is_exit_input(text):
+                self._dispatch_session_end()
                 self._ui.show_goodbye()
                 return 0
             try:
                 should_exit = self._runner.run(self._handle_input(text))
                 if should_exit:
+                    self._dispatch_session_end()
                     self._ui.show_goodbye()
                     return 0
             except ExitRequested:
+                self._dispatch_session_end()
                 self._ui.show_goodbye()
                 return 0
             except KeyboardInterrupt:
                 self._ui.show_cancelled()
             except ProviderError as error:
+                self._dispatch_system_error(error)
                 self._ui.show_error(error)
             except Exception as error:
+                self._dispatch_system_error(error)
                 self._ui.show_runtime_error(error)
 
     async def _handle_input(self, text: str) -> bool:
@@ -150,6 +165,55 @@ class OkCodeApp:
         set_mode = getattr(self._ui, "set_runtime_mode", None)
         if callable(set_mode):
             set_mode(self._conversation.runtime_mode)
+
+    def _dispatch_session_start(self) -> None:
+        self._dispatch_hook(
+            HookContext(
+                HookEvent.SESSION_START,
+                {
+                    "session.id": self._conversation.session_snapshot().session_id,
+                    "runtime.mode": self._conversation.runtime_mode.value,
+                },
+            )
+        )
+
+    def _dispatch_session_end(self) -> None:
+        if self._session_closed:
+            return
+        self._session_closed = True
+        self._dispatch_hook(
+            HookContext(
+                HookEvent.SESSION_END,
+                {
+                    "session.id": self._conversation.session_snapshot().session_id,
+                    "session.turn_count": self._conversation.turn_count,
+                },
+            )
+        )
+
+    def _dispatch_system_error(self, error: Exception) -> None:
+        category = type(error).__name__
+        message = str(error)
+        if isinstance(error, ProviderError):
+            category = error.kind.value
+            message = error.safe_message
+        self._dispatch_hook(
+            HookContext(
+                HookEvent.ERROR,
+                {
+                    "error.category": category,
+                    "error.message": message,
+                },
+            )
+        )
+
+    def _dispatch_hook(self, context: HookContext) -> None:
+        if self._hooks is None:
+            return
+        try:
+            self._runner.run(self._hooks.dispatch(context))
+        except Exception as exc:
+            _LOG.info("Hook 事件分发失败：%s", exc)
 
     def _is_exit_input(self, text: str) -> bool:
         stripped = text.strip()

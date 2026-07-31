@@ -9,6 +9,9 @@ import pytest
 from okcode.context import ArtifactStore, ContextConfig, ContextManager
 from okcode.conversation import AgentConfig, ConversationSession
 from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.hooks.actions import HookActionOutcome
+from okcode.hooks.models import HookContext, HookControl, HookEvent, HookRule, PromptHookAction
+from okcode.hooks.runtime import HookRuntime
 from okcode.mcp.models import McpCallResult, McpRemoteToolInfo
 from okcode.mcp.tool import McpRemoteTool
 from okcode.memory.models import (
@@ -67,6 +70,7 @@ def _session(
     context_manager: ContextManager | None = None,
     session_store: SessionStore | None = None,
     memory_worker: object | None = None,
+    hooks: HookRuntime | None = None,
 ) -> ConversationSession:
     actual_registry = registry or ToolRegistry()
     return ConversationSession(
@@ -78,7 +82,17 @@ def _session(
         session_store=session_store,
         session_journal=session_store.create_journal() if session_store is not None else None,
         memory_worker=memory_worker,  # type: ignore[arg-type]
+        hooks=hooks,
     )
+
+
+class RecordingHookRunner:
+    async def run(self, rule: HookRule, context: HookContext) -> HookActionOutcome:
+        return HookActionOutcome(
+            "prompt",
+            prompt_content=getattr(rule.action, "content", None),
+            prompt_scope=getattr(rule.action, "scope", None),
+        )
 
 
 class ControlledTool:
@@ -935,3 +949,57 @@ async def test_restore_compacts_once_before_replacing_history(tmp_path: Path) ->
     assert len(provider.provider_requests) == 1
     assert provider.provider_requests[0].tools == ()
     assert context.state.summary is not None
+
+
+@pytest.mark.asyncio
+async def test_hooks_observe_user_assistant_and_turn_lifecycle() -> None:
+    runtime = HookRuntime(
+        (
+            HookRule("user", HookEvent.MESSAGE_USER, None, PromptHookAction("u"), HookControl()),
+            HookRule("start", HookEvent.TURN_START, None, PromptHookAction("s"), HookControl()),
+            HookRule(
+                "assistant",
+                HookEvent.MESSAGE_ASSISTANT,
+                None,
+                PromptHookAction("a"),
+                HookControl(),
+            ),
+            HookRule("end", HookEvent.TURN_END, None, PromptHookAction("e"), HookControl()),
+        ),
+        runner=RecordingHookRunner(),  # type: ignore[arg-type]
+    )
+    provider = FakeProvider([[StreamCompleted(ChatMessage(Role.ASSISTANT, "回答"))]])
+    session = _session(provider, hooks=runtime)
+
+    _ = [event async for event in session.stream_user_message("你好")]
+
+    assert [record.rule_identifier for record in runtime.records] == [
+        "user",
+        "start",
+        "assistant",
+        "end",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hook_prompt_instruction_reaches_provider_request_without_history_pollution() -> None:
+    runtime = HookRuntime(
+        (
+            HookRule(
+                "inject",
+                HookEvent.MESSAGE_USER,
+                None,
+                PromptHookAction("请保持简洁。"),
+                HookControl(),
+            ),
+        ),
+        runner=RecordingHookRunner(),  # type: ignore[arg-type]
+    )
+    provider = FakeProvider([[StreamCompleted(ChatMessage(Role.ASSISTANT, "回答"))]])
+    session = _session(provider, hooks=runtime)
+
+    _ = [event async for event in session.stream_user_message("你好")]
+
+    dynamic = provider.provider_requests[0].prompt.dynamic_system
+    assert any(item.kind == "hook" and "请保持简洁" in item.content for item in dynamic)
+    assert [message.role for message in session.messages] == [Role.USER, Role.ASSISTANT]

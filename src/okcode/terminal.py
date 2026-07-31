@@ -24,6 +24,7 @@ from okcode.models import (
     CommandNotice,
     CommandSession,
     CommandStatus,
+    HookListEvent,
     PermissionStatus,
     ProviderConfig,
     RuntimeModeChanged,
@@ -196,6 +197,8 @@ class TerminalUI:
             self._render_command_memory(event)
         elif isinstance(event, CommandSession):
             self._render_command_session(event)
+        elif isinstance(event, HookListEvent):
+            self._render_hook_list(event)
         elif isinstance(event, SkillListEvent):
             self._render_skill_list(event)
         elif isinstance(event, RuntimeModeChanged):
@@ -412,6 +415,39 @@ class TerminalUI:
         self._finish_line()
         self._console.print(f"会话 ID：{event.session_id or '（未启用）'}", style="dim")
         self._console.print(f"存档文件：{event.journal_path or '（未启用）'}", style="dim")
+        self._turn_open = True
+
+    def _render_hook_list(self, event: HookListEvent) -> None:
+        self._finish_line()
+        if not event.entries:
+            self._console.print("Hook：当前未加载 Hook 规则。", style="dim")
+            self._console.print(f"配置文件：{event.config_path}", style="dim")
+            self._turn_open = True
+            return
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("规则", no_wrap=True)
+        table.add_column("事件", no_wrap=True)
+        table.add_column("条件")
+        table.add_column("动作", no_wrap=True)
+        table.add_column("启用", no_wrap=True)
+        table.add_column("once", no_wrap=True)
+        table.add_column("后台", no_wrap=True)
+        table.add_column("超时", justify="right", no_wrap=True)
+        table.add_column("SubAgent", no_wrap=True)
+        for entry in event.entries:
+            table.add_row(
+                entry.identifier,
+                entry.event,
+                entry.condition,
+                entry.action,
+                "是" if entry.enabled else "否",
+                "是" if entry.once else "否",
+                "是" if entry.background else "否",
+                f"{entry.timeout_seconds:g}s",
+                "占位" if entry.subagent_placeholder else "-",
+            )
+        self._console.print(f"配置文件：{event.config_path}", style="dim")
+        self._console.print(table)
         self._turn_open = True
 
     def _render_skill_list(self, event: SkillListEvent) -> None:

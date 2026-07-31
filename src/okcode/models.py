@@ -300,6 +300,29 @@ class SkillListEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class HookListEntry:
+    """/hooks 列表中的一行。"""
+
+    identifier: str
+    event: str
+    condition: str
+    action: str
+    enabled: bool
+    once: bool
+    background: bool
+    timeout_seconds: float
+    subagent_placeholder: bool
+
+
+@dataclass(frozen=True, slots=True)
+class HookListEvent:
+    """/hooks 命令输出。"""
+
+    entries: tuple[HookListEntry, ...]
+    config_path: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeModeChanged:
     """运行时模式切换提示。"""
 
@@ -325,5 +348,6 @@ type TurnEvent = (
     | CommandMemory
     | CommandSession
     | SkillListEvent
+    | HookListEvent
     | RuntimeModeChanged
 )

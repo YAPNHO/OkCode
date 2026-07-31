@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from inspect import isawaitable
 
@@ -21,10 +22,12 @@ from okcode.permissions.models import (
 from okcode.permissions.rules import PermissionPaths, append_local_allow_rule
 from okcode.tools.models import (
     JSONValue,
+    PermissionTarget,
     PermissionTargetKind,
     ToolDefinition,
     ToolErrorCode,
     ToolFailure,
+    ToolSafety,
 )
 from okcode.tools.workspace import Workspace
 
@@ -94,6 +97,34 @@ class PermissionManager:
         request_or_decision = self._authorize_without_confirmation(call, tool, arguments)
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
+        return await self._confirm_async(request_or_decision)
+
+    async def authorize_hook_command_async(
+        self,
+        command: str,
+        *,
+        background: bool = False,
+    ) -> PermissionDecision:
+        """复用权限系统判断 Hook shell 命令能否启动。"""
+
+        call = ToolCall("__hook_command__", "run_command", json.dumps({"command": command}))
+        tool = ToolDefinition(
+            name="run_command",
+            description="Hook shell 命令权限检查。",
+            input_schema={},
+            timeout_seconds=0,
+            safety=ToolSafety.SIDE_EFFECT,
+            permission_target=PermissionTarget(PermissionTargetKind.COMMAND, "command"),
+        )
+        request_or_decision = self._authorize_without_confirmation(call, tool, {"command": command})
+        if isinstance(request_or_decision, PermissionDecision):
+            return request_or_decision
+        if background:
+            return PermissionDecision(
+                False,
+                RuleSource.USER_CONFIRMATION,
+                "后台 Hook 命令需要用户确认，已拒绝执行。",
+            )
         return await self._confirm_async(request_or_decision)
 
     def _authorize_without_confirmation(

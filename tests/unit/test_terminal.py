@@ -12,6 +12,8 @@ from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
+    HookListEntry,
+    HookListEvent,
     PermissionStatus,
     SkillListEntry,
     SkillListEvent,
@@ -207,6 +209,51 @@ def test_skill_list_renders_metadata_activation_and_issues() -> None:
     assert "project" in text
     assert "已激活" in text
     assert "Skill 问题" in text
+
+
+def test_hook_list_renders_empty_state_and_loaded_rules() -> None:
+    ui, output = _ui(width=140)
+    ui.render_event(HookListEvent((), "D:/repo/.okcode/hooks.yaml"))
+    ui.render_event(
+        HookListEvent(
+            (
+                HookListEntry(
+                    "guard-shell",
+                    "tool.before",
+                    "tool.name=exact:run_command",
+                    "shell",
+                    True,
+                    True,
+                    False,
+                    3.0,
+                    False,
+                ),
+                HookListEntry(
+                    "notify-agent",
+                    "turn.end",
+                    "无条件",
+                    "subagent",
+                    False,
+                    False,
+                    True,
+                    10.0,
+                    True,
+                ),
+            ),
+            "D:/repo/.okcode/hooks.yaml",
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "Hook：当前未加载 Hook 规则。" in text
+    assert "配置文件：D:/repo/.okcode/hooks.yaml" in text
+    assert "guard-shell" in text
+    assert "tool.before" in text
+    assert "tool.name=exact:run_command" in text
+    assert "shell" in text
+    assert "notify-agent" in text
+    assert "占位" in text
 
 
 def test_token_usage_shows_real_cache_fields_when_available() -> None:

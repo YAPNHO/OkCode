@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import platform as host_platform
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -20,6 +21,8 @@ from okcode.commands.models import (
 )
 from okcode.context import ContextManager, SummaryPlan, SummaryRequestFactory
 from okcode.errors import ProviderError, ProviderErrorKind
+from okcode.hooks.models import HookContext, HookEvent
+from okcode.hooks.runtime import HookRuntime
 from okcode.memory.models import MemoryJob
 from okcode.memory.store import MemoryStore
 from okcode.memory.worker import MemoryWorker
@@ -29,6 +32,7 @@ from okcode.models import (
     AgentStopReason,
     ChatMessage,
     CommandNotice,
+    HookListEvent,
     PermissionStatus,
     ProviderRequest,
     Role,
@@ -55,6 +59,8 @@ from okcode.sessions import SessionDescriptor, SessionJournal, SessionStore
 from okcode.tools.executor import PreparedToolCall, ToolExecutor
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult, ToolSafety
 from okcode.tools.registry import ToolRegistry
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from okcode.skills.runtime import SkillRuntime
@@ -101,6 +107,7 @@ class ConversationSession:
         model_name: str = "",
         workspace_root: Path | None = None,
         skill_runtime: SkillRuntime | None = None,
+        hooks: HookRuntime | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -119,6 +126,7 @@ class ConversationSession:
         self._model_name = model_name
         self._workspace_root = workspace_root or Path.cwd()
         self._skill_runtime = skill_runtime
+        self._hooks = hooks
         self._messages: tuple[ChatMessage, ...] = ()
         self._saved_plan: SavedPlan | None = None
         self._resumption_notice: str | None = None
@@ -145,11 +153,20 @@ class ConversationSession:
     def runtime_mode(self) -> RuntimeMode:
         return self._runtime_mode
 
+    @property
+    def turn_count(self) -> int:
+        return self._turn_count
+
     def set_runtime_mode(self, mode: RuntimeMode) -> None:
         self._runtime_mode = mode
 
     def permission_string(self) -> str:
         return self._runtime_mode.value
+
+    def hook_list_event(self) -> HookListEvent:
+        if self._hooks is None:
+            return HookListEvent((), str(self._workspace_root / ".okcode" / "hooks.yaml"))
+        return HookListEvent(self._hooks.list_entries(), self._hooks.config_path)
 
     def session_snapshot(self) -> CommandSessionSnapshot:
         if self._session_journal is None:
@@ -305,11 +322,12 @@ class ConversationSession:
         turn_kind = TurnKind.PLAN if actual_mode is RuntimeMode.PLAN else TurnKind.NORMAL
         save_plan_task = user_text if actual_mode is RuntimeMode.PLAN else None
         user_message = ChatMessage(role=Role.USER, content=user_text)
-        async for event in self._run_agent(
+        async for event in self._stream_hooked_agent(
             user_message,
             tools,
             save_plan_task=save_plan_task,
             turn_kind=turn_kind,
+            runtime_mode=actual_mode,
         ):
             yield event
 
@@ -326,12 +344,72 @@ class ConversationSession:
             role=Role.USER,
             content="请执行当前会话最近一次计划：\n" + self._saved_plan.content,
         )
-        async for event in self._run_agent(
+        async for event in self._stream_hooked_agent(
             user_message,
             self._registry.definitions(),
             turn_kind=TurnKind.DO,
+            runtime_mode=RuntimeMode.DEFAULT,
         ):
             yield event
+
+    async def _stream_hooked_agent(
+        self,
+        user_message: ChatMessage,
+        tools: Sequence[ToolDefinition],
+        *,
+        save_plan_task: str | None = None,
+        turn_kind: TurnKind,
+        runtime_mode: RuntimeMode,
+    ) -> AsyncIterator[TurnEvent]:
+        outcome = "completed"
+        turn_index = self._turn_count + 1
+        await self._dispatch_hook(
+            HookContext(
+                HookEvent.MESSAGE_USER,
+                {
+                    "message.content": user_message.content,
+                    "runtime.mode": runtime_mode.value,
+                },
+            )
+        )
+        await self._dispatch_hook(
+            HookContext(
+                HookEvent.TURN_START,
+                {
+                    "turn.kind": turn_kind.value,
+                    "turn.index": turn_index,
+                    "runtime.mode": runtime_mode.value,
+                    "message.content": user_message.content,
+                },
+            )
+        )
+        try:
+            async for event in self._run_agent(
+                user_message,
+                tools,
+                save_plan_task=save_plan_task,
+                turn_kind=turn_kind,
+                runtime_mode=runtime_mode,
+            ):
+                if isinstance(event, AgentStopped):
+                    outcome = event.reason.value
+                yield event
+        except Exception:
+            outcome = "error"
+            raise
+        finally:
+            await self._dispatch_hook(
+                HookContext(
+                    HookEvent.TURN_END,
+                    {
+                        "turn.kind": turn_kind.value,
+                        "turn.index": turn_index,
+                        "turn.outcome": outcome,
+                    },
+                )
+            )
+            if self._hooks is not None:
+                self._hooks.end_turn()
 
     async def stream_manual_compaction(self) -> AsyncIterator[TurnEvent]:
         """无条件执行一次手动摘要，不进入普通 Agent Loop。"""
@@ -346,6 +424,7 @@ class ConversationSession:
         *,
         save_plan_task: str | None = None,
         turn_kind: TurnKind,
+        runtime_mode: RuntimeMode,
     ) -> AsyncIterator[TurnEvent]:
         pending: list[ChatMessage] = [user_message]
         consecutive_unknown_tools = 0
@@ -380,6 +459,8 @@ class ConversationSession:
                     model_request,
                 )
 
+            if self._hooks is not None:
+                self._hooks.mark_request_dispatched()
             completed: StreamCompleted | None = None
             async for event in self._provider.stream(request):
                 if isinstance(event, StreamCompleted):
@@ -401,6 +482,16 @@ class ConversationSession:
             if assistant_message.role is not Role.ASSISTANT:
                 raise ProviderError(ProviderErrorKind.STREAM, "模型完成事件不是助手消息。")
             pending.append(assistant_message)
+            await self._dispatch_hook(
+                HookContext(
+                    HookEvent.MESSAGE_ASSISTANT,
+                    {
+                        "message.content": assistant_message.content,
+                        "message.tool_call_count": len(assistant_message.tool_calls),
+                        "runtime.mode": runtime_mode.value,
+                    },
+                )
+            )
 
             if not assistant_message.tool_calls:
                 if not assistant_message.content.strip():
@@ -487,6 +578,14 @@ class ConversationSession:
             )
         elif additional_instructions != context.additional_system_instructions:
             context = replace(context, additional_system_instructions=additional_instructions)
+        if self._hooks is not None:
+            context = replace(
+                context,
+                additional_system_instructions=(
+                    *context.additional_system_instructions,
+                    *self._hooks.system_instructions(),
+                ),
+            )
         prompt = self._prompt_builder.build(context, visible_tools)
         return ProviderRequest(
             messages=(*self._messages, *pending),
@@ -622,7 +721,24 @@ class ConversationSession:
                 "上下文摘要失败，已保留原历史并停止本轮任务。",
             )
         self._messages = self._context_manager.commit_summary(plan, summary)
+        await self._dispatch_hook(
+            HookContext(
+                HookEvent.CONTEXT_COMPACTED,
+                {
+                    "context.reason": "manual" if not plan.retained_history else "automatic",
+                    "context.summary_length": len(summary),
+                },
+            )
+        )
         return None
+
+    async def _dispatch_hook(self, context: HookContext) -> None:
+        if self._hooks is None:
+            return
+        try:
+            await self._hooks.dispatch(context)
+        except Exception as exc:
+            _LOG.info("Hook 事件分发失败：%s", exc)
 
     @staticmethod
     def _circuit_stopped() -> AgentStopped:

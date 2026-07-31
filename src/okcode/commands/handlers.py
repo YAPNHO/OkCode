@@ -101,6 +101,10 @@ def permission_command(context: CommandContext, command: ParsedCommand) -> Comma
     return CommandResult(events=(CommandNotice(context.conversation.permission_string()),))
 
 
+def hooks_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
+    return CommandResult(events=(context.conversation.hook_list_event(),))
+
+
 def session_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
     snapshot = context.conversation.session_snapshot()
     return CommandResult(events=(CommandSession(snapshot.session_id, snapshot.journal_path),))

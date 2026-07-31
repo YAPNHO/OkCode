@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator, ValidationError
 
+from okcode.hooks.models import HookContext, HookEvent
+from okcode.hooks.runtime import HookRuntime
 from okcode.models import ToolCall
 from okcode.permissions.manager import PermissionManager
 from okcode.tools.base import Tool
@@ -43,11 +45,13 @@ class ToolExecutor:
         registry: ToolRegistry,
         *,
         permissions: PermissionManager | None = None,
+        hooks: HookRuntime | None = None,
         content_limit: int = _CONTENT_LIMIT,
         data_limit: int = _DATA_LIMIT,
     ) -> None:
         self._registry = registry
         self._permissions = permissions
+        self._hooks = hooks
         self._content_limit = content_limit
         self._data_limit = data_limit
 
@@ -97,6 +101,21 @@ class ToolExecutor:
                         "executed": False,
                     },
                 )
+        if self._hooks is not None:
+            interception = await self._hooks.dispatch(
+                _tool_context(HookEvent.TOOL_BEFORE, call, tool.definition, arguments)
+            )
+            if interception is not None:
+                return self._failure(
+                    call,
+                    ToolErrorCode.PERMISSION_DENIED,
+                    interception.reason + " 调用未执行，请调整参数或改用其他方案。",
+                    {
+                        "hook_rule": interception.rule_identifier,
+                        "hook_event": HookEvent.TOOL_BEFORE.value,
+                        "executed": False,
+                    },
+                )
         return PreparedToolCall(call, tool, arguments)
 
     async def execute_prepared(self, prepared: PreparedToolCall) -> ToolExecutionResult:
@@ -111,30 +130,35 @@ class ToolExecutor:
                 tool.execute(arguments), timeout=tool.definition.timeout_seconds
             )
         except TimeoutError:
-            return self._failure(
+            result = self._failure(
                 call,
                 ToolErrorCode.TIMEOUT,
                 f"工具 {call.name} 执行超时。",
             )
         except ToolFailure as failure:
-            return self._failure(call, failure.code, failure.content, failure.data)
+            result = self._failure(call, failure.code, failure.content, failure.data)
         except Exception:
-            return self._failure(
+            result = self._failure(
                 call,
                 ToolErrorCode.INTERNAL_ERROR,
                 "工具执行出现内部错误，请调整参数后重试。",
             )
-
-        content, data, truncated = self._bound_output(output)
-        return ToolExecutionResult(
-            tool_call_id=call.id,
-            tool_name=call.name,
-            success=True,
-            content=content,
-            error_code=None,
-            data=data,
-            truncated=truncated,
-        )
+        else:
+            content, data, truncated = self._bound_output(output)
+            result = ToolExecutionResult(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                success=True,
+                content=content,
+                error_code=None,
+                data=data,
+                truncated=truncated,
+            )
+        if self._hooks is not None:
+            await self._hooks.dispatch(
+                _tool_context(HookEvent.TOOL_AFTER, call, tool.definition, arguments, result)
+            )
+        return result
 
     def _failure(
         self,
@@ -175,3 +199,40 @@ class ToolExecutor:
             }
             truncated = True
         return content, data, truncated
+
+
+def _tool_context(
+    event: HookEvent,
+    call: ToolCall,
+    tool: object,
+    arguments: Mapping[str, JSONValue],
+    result: ToolExecutionResult | None = None,
+) -> HookContext:
+    from okcode.tools.models import ToolDefinition
+
+    assert isinstance(tool, ToolDefinition)
+    values: dict[str, JSONValue] = {
+        "tool.name": call.name,
+        "tool.safety": tool.safety.value,
+    }
+    target = _tool_target(tool, arguments)
+    if target is not None:
+        values["tool.target"] = target
+    for key, value in arguments.items():
+        values[f"tool.arguments.{key}"] = value
+    if result is not None:
+        values["tool.result.success"] = result.success
+        values["tool.result.error_code"] = result.error_code.value if result.error_code else ""
+        values["tool.result.truncated"] = result.truncated
+    return HookContext(event, values)
+
+
+def _tool_target(tool: object, arguments: Mapping[str, JSONValue]) -> str | None:
+    from okcode.tools.models import PermissionTargetKind, ToolDefinition
+
+    assert isinstance(tool, ToolDefinition)
+    target = tool.permission_target
+    if target.kind is PermissionTargetKind.NONE or target.argument_name is None:
+        return None
+    value = arguments.get(target.argument_name)
+    return value if isinstance(value, str) else None

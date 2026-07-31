@@ -11,6 +11,8 @@ from okcode.config import load_config
 from okcode.context import ArtifactStore, ContextManager
 from okcode.conversation import ConversationSession
 from okcode.errors import ConfigError
+from okcode.hooks import HookPaths, HookRuntime, load_hook_rules
+from okcode.hooks.actions import HookActionRunner
 from okcode.instructions import InstructionLoader, InstructionPaths
 from okcode.mcp import McpClientManager, McpConfigPaths, load_mcp_config
 from okcode.mcp.models import McpDiscoveryWarning
@@ -52,6 +54,7 @@ def main() -> int:
     provider = None
     mcp_manager = None
     memory_worker = None
+    hooks = None
     try:
         workspace = Workspace(Path.cwd())
         session_store = SessionStore(workspace.root)
@@ -103,8 +106,15 @@ def main() -> int:
             permission_tool_names,
             confirmer=ui.confirm_permission,
         )
+        hook_paths = HookPaths.for_workspace(workspace.root)
+        hook_rules = load_hook_rules(hook_paths)
+        hooks = HookRuntime(
+            hook_rules,
+            runner=HookActionRunner(workspace, permissions=permissions),
+            config_path=str(hook_paths.config),
+        )
         provider = create_provider(config.active_provider)
-        executor = ToolExecutor(registry, permissions=permissions)
+        executor = ToolExecutor(registry, permissions=permissions, hooks=hooks)
         context_manager = ContextManager(ArtifactStore(workspace.root))
         runner_for_skill = SkillRunner(
             provider,
@@ -150,6 +160,7 @@ def main() -> int:
             model_name=config.active_provider.model,
             workspace_root=workspace.root,
             skill_runtime=skill_runtime,
+            hooks=hooks,
         )
         set_command_registry = getattr(ui, "set_command_registry", None)
         if callable(set_command_registry):
@@ -163,6 +174,7 @@ def main() -> int:
             config.active_provider,
             command_registry,
             skill_runtime,
+            hooks,
         )
         return app.run()
     except (ConfigError, SkillValidationError) as error:
@@ -185,6 +197,11 @@ def main() -> int:
         if provider is not None:
             try:
                 runner.run(provider.aclose())
+            except Exception:
+                pass
+        if hooks is not None:
+            try:
+                runner.run(hooks.aclose())
             except Exception:
                 pass
         runner.close()

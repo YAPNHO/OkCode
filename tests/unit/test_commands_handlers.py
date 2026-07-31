@@ -22,6 +22,7 @@ from okcode.models import (
     CommandNotice,
     CommandSession,
     CommandStatus,
+    HookListEvent,
     RuntimeModeChanged,
     TurnEvent,
 )
@@ -55,6 +56,9 @@ class DummyConversation:
 
     def permission_string(self) -> str:
         return self.mode.value
+
+    def hook_list_event(self) -> TurnEvent:
+        return HookListEvent((), "D:/repo/.okcode/hooks.yaml")
 
     def session_snapshot(self) -> CommandSessionSnapshot:
         return CommandSessionSnapshot("session-1", "D:/repo/session.jsonl")
@@ -104,6 +108,7 @@ def test_default_registry_contains_builtin_commands_including_skill() -> None:
         "do": CommandKind.PROMPT,
         "exit": CommandKind.UI,
         "help": CommandKind.LOCAL,
+        "hooks": CommandKind.LOCAL,
         "memory": CommandKind.LOCAL,
         "permission": CommandKind.LOCAL,
         "plan": CommandKind.UI,
@@ -128,7 +133,7 @@ async def test_help_lists_visible_commands_sorted_by_name() -> None:
     event = result.command_result.events[0]
     assert isinstance(event, CommandHelp)
     assert [entry.name for entry in event.entries] == sorted(entry.name for entry in event.entries)
-    assert len(event.entries) == 13
+    assert len(event.entries) == 14
 
 
 @pytest.mark.asyncio
@@ -138,6 +143,7 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
     status = await _dispatch("/status", conversation)
     memory = await _dispatch("/memory", conversation)
     permission = await _dispatch("/permission", conversation)
+    hooks = await _dispatch("/hooks", conversation)
     session = await _dispatch("/session", conversation)
 
     assert isinstance(status.command_result.events[0], CommandStatus)  # type: ignore[union-attr]
@@ -145,6 +151,7 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
     assert isinstance(memory.command_result.events[0], CommandMemory)  # type: ignore[union-attr]
     assert memory.command_result.events[0].project_memory_files == ("PROJECT.md",)  # type: ignore[union-attr]
     assert permission.command_result.events == (CommandNotice("default"),)  # type: ignore[union-attr]
+    assert hooks.command_result.events == (HookListEvent((), "D:/repo/.okcode/hooks.yaml"),)  # type: ignore[union-attr]
     assert isinstance(session.command_result.events[0], CommandSession)  # type: ignore[union-attr]
     assert session.command_result.events[0].session_id == "session-1"  # type: ignore[union-attr]
 
