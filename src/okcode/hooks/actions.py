@@ -27,6 +27,10 @@ from okcode.hooks.models import (
 from okcode.permissions.manager import PermissionManager
 from okcode.tools.workspace import Workspace
 
+if False:  # pragma: no cover
+    from okcode.agents.launcher import AgentLauncher
+    from okcode.agents.models import ParentAgentContext
+
 _LOG = logging.getLogger(__name__)
 _STREAM_LIMIT = 6_000
 
@@ -65,11 +69,15 @@ class HookActionRunner:
         permissions: PermissionManager | None = None,
         shell_runner: ShellRunner | None = None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        agent_launcher: AgentLauncher | None = None,
+        parent_context_provider: Callable[[], ParentAgentContext] | None = None,
     ) -> None:
         self._workspace = workspace
         self._permissions = permissions
         self._shell_runner = shell_runner or _run_shell_command
         self._http_client_factory = http_client_factory or httpx.AsyncClient
+        self._agent_launcher = agent_launcher
+        self._parent_context_provider = parent_context_provider
 
     async def run(self, rule: HookRule, context: HookContext) -> HookActionOutcome:
         """执行单条规则动作。"""
@@ -87,6 +95,16 @@ class HookActionRunner:
         if isinstance(action, HttpHookAction):
             return await self._run_http(rule, context, action)
         if isinstance(action, SubAgentHookAction):
+            if self._agent_launcher is not None and self._parent_context_provider is not None:
+                snapshot = self._agent_launcher.launch_from_hook(
+                    action,
+                    context,
+                    self._parent_context_provider(),
+                )
+                return HookActionOutcome(
+                    "subagent_started",
+                    f"子 Agent 后台任务已启动：{snapshot.task_id}",
+                )
             return HookActionOutcome(
                 "subagent_skipped",
                 f"子 Agent 动作已跳过，等待 SubAgent 阶段对接：{action.task[:80]}",

@@ -17,6 +17,7 @@ from okcode.commands.handlers import (
     session_command,
     skill_command,
     status_command,
+    tasks_command,
 )
 from okcode.commands.models import CommandDefinition, CommandKind
 from okcode.commands.registry import CommandRegistry
@@ -136,6 +137,16 @@ def build_default_command_registry() -> CommandRegistry:
                 None,
                 False,
                 hooks_command,
+            ),
+            CommandDefinition(
+                "tasks",
+                (),
+                "列出或控制后台子 Agent 任务。",
+                "/tasks [cancel|background <task_id>]",
+                CommandKind.LOCAL,
+                None,
+                False,
+                tasks_command,
             ),
             CommandDefinition(
                 "session",

@@ -12,6 +12,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from okcode.agents.manager import AgentTaskManager
+from okcode.agents.models import ParentAgentContext
+from okcode.agents.notifications import AgentNotificationBridge
 from okcode.commands.models import (
     CommandMemorySnapshot,
     CommandSessionSnapshot,
@@ -30,6 +33,9 @@ from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
+    AgentTaskListEntry,
+    AgentTaskListEvent,
+    AgentTaskNotice,
     ChatMessage,
     CommandNotice,
     HookListEvent,
@@ -46,6 +52,7 @@ from okcode.models import (
     TurnEvent,
 )
 from okcode.permissions.manager import PermissionManager
+from okcode.permissions.models import PermissionMode
 from okcode.prompt import (
     PromptBuildContext,
     PromptBuilder,
@@ -108,6 +115,8 @@ class ConversationSession:
         workspace_root: Path | None = None,
         skill_runtime: SkillRuntime | None = None,
         hooks: HookRuntime | None = None,
+        initial_messages: Sequence[ChatMessage] = (),
+        agent_task_manager: AgentTaskManager | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -127,12 +136,17 @@ class ConversationSession:
         self._workspace_root = workspace_root or Path.cwd()
         self._skill_runtime = skill_runtime
         self._hooks = hooks
-        self._messages: tuple[ChatMessage, ...] = ()
+        self._agent_task_manager = agent_task_manager
+        self._agent_notification_bridge = AgentNotificationBridge()
+        self._messages: tuple[ChatMessage, ...] = tuple(initial_messages)
         self._saved_plan: SavedPlan | None = None
         self._resumption_notice: str | None = None
         self._runtime_mode = RuntimeMode.DEFAULT
         self._cumulative_input_tokens = 0
         self._cumulative_output_tokens = 0
+        self._child_input_tokens = 0
+        self._child_output_tokens = 0
+        self._child_tool_calls = 0
         self._turn_count = 0
 
     @property
@@ -159,6 +173,18 @@ class ConversationSession:
 
     def set_runtime_mode(self, mode: RuntimeMode) -> None:
         self._runtime_mode = mode
+
+    def parent_agent_context(self, tools: Sequence[ToolDefinition]) -> ParentAgentContext:
+        """返回启动子 Agent 所需的父会话快照。"""
+
+        return ParentAgentContext(
+            session_id=self.session_snapshot().session_id,
+            messages=tuple(self._messages),
+            runtime_mode=self._runtime_mode,
+            permission_mode=self._permissions.mode if self._permissions else PermissionMode.DEFAULT,
+            visible_tool_names=tuple(tool.name for tool in tools),
+            depth=0,
+        )
 
     def permission_string(self) -> str:
         return self._runtime_mode.value
@@ -194,7 +220,47 @@ class ConversationSession:
             len(memory.project_memory_files) + len(memory.user_memory_files),
             self._model_name,
             str(self._workspace_root),
+            self._child_input_tokens,
+            self._child_output_tokens,
+            self._child_tool_calls,
         )
+
+    def agent_task_list_event(self) -> AgentTaskListEvent:
+        """返回后台子 Agent 任务列表。"""
+
+        if self._agent_task_manager is None:
+            return AgentTaskListEvent(())
+        return AgentTaskListEvent(
+            tuple(
+                _task_list_entry(snapshot) for snapshot in self._agent_task_manager.list_snapshots()
+            )
+        )
+
+    def cancel_agent_task(self, task_id: str) -> AgentTaskNotice:
+        """取消后台子 Agent 任务。"""
+
+        if self._agent_task_manager is None:
+            return AgentTaskNotice(
+                task_id, "", "missing", None, "", "当前会话未启用子 Agent 任务管理。"
+            )
+        try:
+            snapshot = self._agent_task_manager.cancel(task_id)
+        except LookupError as exc:
+            return AgentTaskNotice(task_id, "", "missing", None, "", str(exc))
+        return _task_notice_from_snapshot(snapshot, "任务取消请求已处理。")
+
+    def background_agent_task(self, task_id: str) -> AgentTaskNotice:
+        """把任务切到后台。"""
+
+        if self._agent_task_manager is None:
+            return AgentTaskNotice(
+                task_id, "", "missing", None, "", "当前会话未启用子 Agent 任务管理。"
+            )
+        try:
+            snapshot = self._agent_task_manager.move_to_background(task_id)
+        except LookupError as exc:
+            return AgentTaskNotice(task_id, "", "missing", None, "", str(exc))
+        return _task_notice_from_snapshot(snapshot, "任务已在后台运行。")
 
     def reset_session(self) -> CommandNotice:
         if self._session_journal is not None:
@@ -586,6 +652,27 @@ class ConversationSession:
                     *self._hooks.system_instructions(),
                 ),
             )
+        if self._agent_task_manager is not None:
+            notifications = self._agent_task_manager.drain_notifications(
+                self.session_snapshot().session_id
+            )
+            if notifications:
+                instructions = []
+                for notification in notifications:
+                    usage = notification.result.usage
+                    self._child_input_tokens += usage.input_tokens
+                    self._child_output_tokens += usage.output_tokens
+                    self._child_tool_calls += usage.tool_call_count
+                    instructions.append(
+                        self._agent_notification_bridge.to_system_instruction(notification)
+                    )
+                context = replace(
+                    context,
+                    additional_system_instructions=(
+                        *context.additional_system_instructions,
+                        *instructions,
+                    ),
+                )
         prompt = self._prompt_builder.build(context, visible_tools)
         return ProviderRequest(
             messages=(*self._messages, *pending),
@@ -850,3 +937,31 @@ def _memory_file_names(root: Path) -> tuple[str, ...]:
     if not root.is_dir():
         return ()
     return tuple(sorted(path.name for path in root.glob("*.md") if path.is_file()))
+
+
+def _task_list_entry(snapshot: object) -> AgentTaskListEntry:
+    usage = getattr(snapshot, "usage")
+    return AgentTaskListEntry(
+        getattr(snapshot, "task_id"),
+        getattr(snapshot, "kind").value,
+        getattr(snapshot, "status").value,
+        getattr(snapshot, "role_name"),
+        getattr(snapshot, "elapsed_seconds"),
+        getattr(snapshot, "rounds"),
+        getattr(snapshot, "tool_call_count"),
+        usage.input_tokens,
+        usage.output_tokens,
+        getattr(snapshot, "summary"),
+        getattr(snapshot, "error"),
+    )
+
+
+def _task_notice_from_snapshot(snapshot: object, fallback: str) -> AgentTaskNotice:
+    return AgentTaskNotice(
+        getattr(snapshot, "task_id"),
+        getattr(snapshot, "kind").value if getattr(snapshot, "kind", None) is not None else "",
+        getattr(snapshot, "status").value if getattr(snapshot, "status", None) is not None else "",
+        getattr(snapshot, "role_name"),
+        getattr(snapshot, "summary") or fallback,
+        getattr(snapshot, "error"),
+    )

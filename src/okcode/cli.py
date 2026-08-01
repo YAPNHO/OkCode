@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
+from okcode.agents import (
+    AGENT_TOOL_NAME,
+    AgentLauncher,
+    AgentRolePaths,
+    AgentRunner,
+    AgentTaskManager,
+    AgentTool,
+    load_agent_roles,
+)
 from okcode.app import OkCodeApp
 from okcode.commands import build_default_command_registry
 from okcode.config import load_config
@@ -54,6 +64,7 @@ def main() -> int:
     provider = None
     mcp_manager = None
     memory_worker = None
+    agent_task_manager = None
     hooks = None
     try:
         workspace = Workspace(Path.cwd())
@@ -85,6 +96,7 @@ def main() -> int:
                     )
                 )
         known_tool_names = {definition.name for definition in registry.definitions()}
+        known_tool_names.add(AGENT_TOOL_NAME)
         skill_catalog = SkillCatalog(SkillRoots.for_workspace(workspace.root), known_tool_names)
         skill_runtime = SkillRuntime(
             skill_catalog,
@@ -106,16 +118,42 @@ def main() -> int:
             permission_tool_names,
             confirmer=ui.confirm_permission,
         )
+        provider = create_provider(config.active_provider)
+        context_manager = ContextManager(ArtifactStore(workspace.root))
+
+        def child_provider_factory(model_override: str | None = None):
+            provider_config = config.active_provider
+            if model_override:
+                provider_config = replace(provider_config, model=model_override)
+            return create_provider(provider_config)
+
+        agent_roles = load_agent_roles(AgentRolePaths.for_workspace(workspace.root))
+        agent_runner = AgentRunner(
+            child_provider_factory,
+            registry,
+            workspace_root=workspace.root,
+            cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
+            parent_permissions=permissions,
+        )
+        agent_task_manager = AgentTaskManager(agent_runner)
+        agent_launcher = AgentLauncher(agent_roles, registry, agent_task_manager)
+
+        def parent_agent_context():
+            return conversation.parent_agent_context(registry.definitions())
+
         hook_paths = HookPaths.for_workspace(workspace.root)
         hook_rules = load_hook_rules(hook_paths)
         hooks = HookRuntime(
             hook_rules,
-            runner=HookActionRunner(workspace, permissions=permissions),
+            runner=HookActionRunner(
+                workspace,
+                permissions=permissions,
+                agent_launcher=agent_launcher,
+                parent_context_provider=parent_agent_context,
+            ),
             config_path=str(hook_paths.config),
         )
-        provider = create_provider(config.active_provider)
         executor = ToolExecutor(registry, permissions=permissions, hooks=hooks)
-        context_manager = ContextManager(ArtifactStore(workspace.root))
         runner_for_skill = SkillRunner(
             provider,
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
@@ -128,6 +166,7 @@ def main() -> int:
         def context_summary() -> str | None:
             return context_manager.state.summary
 
+        registry.register(AgentTool(agent_launcher, parent_agent_context))
         registry.register(
             LoadSkillTool(
                 skill_catalog,
@@ -161,6 +200,7 @@ def main() -> int:
             workspace_root=workspace.root,
             skill_runtime=skill_runtime,
             hooks=hooks,
+            agent_task_manager=agent_task_manager,
         )
         set_command_registry = getattr(ui, "set_command_registry", None)
         if callable(set_command_registry):
@@ -187,6 +227,11 @@ def main() -> int:
         if memory_worker is not None:
             try:
                 memory_worker.close()
+            except Exception:
+                pass
+        if agent_task_manager is not None:
+            try:
+                agent_task_manager.close()
             except Exception:
                 pass
         if mcp_manager is not None:

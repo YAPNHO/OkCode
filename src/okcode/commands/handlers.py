@@ -85,6 +85,9 @@ def status_command(context: CommandContext, command: ParsedCommand) -> CommandRe
                 snapshot.loaded_memory_item_count,
                 snapshot.model_name,
                 snapshot.working_directory,
+                snapshot.child_input_tokens,
+                snapshot.child_output_tokens,
+                snapshot.child_tool_calls,
             ),
         )
     )
@@ -103,6 +106,21 @@ def permission_command(context: CommandContext, command: ParsedCommand) -> Comma
 
 def hooks_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
     return CommandResult(events=(context.conversation.hook_list_event(),))
+
+
+def tasks_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
+    args = command.args.strip().split()
+    if not args:
+        return CommandResult(events=(context.conversation.agent_task_list_event(),))
+    if len(args) == 2 and args[0] == "cancel":
+        return CommandResult(events=(context.conversation.cancel_agent_task(args[1]),))
+    if len(args) == 2 and args[0] == "background":
+        return CommandResult(events=(context.conversation.background_agent_task(args[1]),))
+    return CommandResult(
+        events=(
+            CommandNotice("用法：/tasks、/tasks cancel <task_id> 或 /tasks background <task_id>"),
+        )
+    )
 
 
 def session_command(context: CommandContext, command: ParsedCommand) -> CommandResult:

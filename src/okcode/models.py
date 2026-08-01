@@ -262,6 +262,9 @@ class CommandStatus:
     loaded_memory_item_count: int
     model_name: str
     working_directory: str
+    child_input_tokens: int = 0
+    child_output_tokens: int = 0
+    child_tool_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +326,42 @@ class HookListEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentTaskNotice:
+    """子 Agent 后台任务状态变化提示。"""
+
+    task_id: str
+    kind: str
+    status: str
+    role_name: str | None
+    summary: str
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTaskListEntry:
+    """/tasks 列表中的一行。"""
+
+    task_id: str
+    kind: str
+    status: str
+    role_name: str | None
+    elapsed_seconds: float
+    rounds: int
+    tool_call_count: int
+    input_tokens: int
+    output_tokens: int
+    summary: str
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTaskListEvent:
+    """/tasks 命令输出。"""
+
+    entries: tuple[AgentTaskListEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeModeChanged:
     """运行时模式切换提示。"""
 
@@ -342,6 +381,8 @@ type TurnEvent = (
     | TokenUsageReported
     | AgentStopped
     | PermissionStatus
+    | AgentTaskNotice
+    | AgentTaskListEvent
     | CommandNotice
     | CommandHelp
     | CommandStatus

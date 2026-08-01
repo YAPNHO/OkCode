@@ -19,6 +19,8 @@ from okcode.mcp.models import McpDiscoveryWarning
 from okcode.models import (
     AgentProgress,
     AgentStopped,
+    AgentTaskListEvent,
+    AgentTaskNotice,
     CommandHelp,
     CommandMemory,
     CommandNotice,
@@ -187,6 +189,10 @@ class TerminalUI:
             self._render_agent_stopped(event)
         elif isinstance(event, PermissionStatus):
             self._render_permission_status(event)
+        elif isinstance(event, AgentTaskNotice):
+            self._render_agent_task_notice(event)
+        elif isinstance(event, AgentTaskListEvent):
+            self._render_agent_task_list(event)
         elif isinstance(event, CommandNotice):
             self._render_command_notice(event)
         elif isinstance(event, CommandHelp):
@@ -396,10 +402,60 @@ class TerminalUI:
             "累计 Token",
             f"输入 {event.cumulative_input_tokens} / 输出 {event.cumulative_output_tokens}",
         )
+        if event.child_input_tokens or event.child_output_tokens or event.child_tool_calls:
+            table.add_row(
+                "子 Agent 用量",
+                (
+                    f"输入 {event.child_input_tokens} / 输出 {event.child_output_tokens} / "
+                    f"工具 {event.child_tool_calls}"
+                ),
+            )
         table.add_row("可用工具数量", str(event.available_tool_count))
         table.add_row("已加载记忆条目数", str(event.loaded_memory_item_count))
         table.add_row("当前模型名", event.model_name)
         table.add_row("当前工作目录", event.working_directory)
+        self._console.print(table)
+        self._turn_open = True
+
+    def _render_agent_task_notice(self, event: AgentTaskNotice) -> None:
+        self._finish_line()
+        role = f" / {event.role_name}" if event.role_name else ""
+        message = f"子 Agent：{event.task_id} [{event.kind}{role}] {event.status}"
+        if event.summary:
+            message += f" — {event.summary}"
+        if event.error:
+            message += f"（{event.error}）"
+        self._console.print(message, style="cyan")
+        self._turn_open = True
+
+    def _render_agent_task_list(self, event: AgentTaskListEvent) -> None:
+        self._finish_line()
+        if not event.entries:
+            self._console.print("子 Agent：当前没有后台任务。", style="dim")
+            self._turn_open = True
+            return
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("任务", no_wrap=True)
+        table.add_column("类型", no_wrap=True)
+        table.add_column("角色", no_wrap=True)
+        table.add_column("状态", no_wrap=True)
+        table.add_column("用时", justify="right", no_wrap=True)
+        table.add_column("轮次", justify="right", no_wrap=True)
+        table.add_column("工具", justify="right", no_wrap=True)
+        table.add_column("用量", no_wrap=True)
+        table.add_column("摘要")
+        for item in event.entries:
+            table.add_row(
+                item.task_id,
+                item.kind,
+                item.role_name or "-",
+                item.status,
+                f"{item.elapsed_seconds:.1f}s",
+                str(item.rounds),
+                str(item.tool_call_count),
+                f"{item.input_tokens}/{item.output_tokens}",
+                item.error or item.summary,
+            )
         self._console.print(table)
         self._turn_open = True
 

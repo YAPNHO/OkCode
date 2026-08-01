@@ -143,6 +143,7 @@ def test_main_builds_default_tool_system_from_current_directory(monkeypatch, tmp
     assert cli.main() == 0
     conversation = observed["conversation"]
     assert [definition.name for definition in conversation._registry.definitions()] == [  # type: ignore[attr-defined]
+        "agent",
         "edit_file",
         "find_files",
         "load_skill",

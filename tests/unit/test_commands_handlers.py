@@ -17,6 +17,7 @@ from okcode.commands.models import (
     CommandStatusSnapshot,
 )
 from okcode.models import (
+    AgentTaskListEvent,
     CommandHelp,
     CommandMemory,
     CommandNotice,
@@ -59,6 +60,15 @@ class DummyConversation:
 
     def hook_list_event(self) -> TurnEvent:
         return HookListEvent((), "D:/repo/.okcode/hooks.yaml")
+
+    def agent_task_list_event(self) -> TurnEvent:
+        return AgentTaskListEvent(())
+
+    def cancel_agent_task(self, task_id: str) -> TurnEvent:
+        return CommandNotice(f"cancel {task_id}")
+
+    def background_agent_task(self, task_id: str) -> TurnEvent:
+        return CommandNotice(f"background {task_id}")
 
     def session_snapshot(self) -> CommandSessionSnapshot:
         return CommandSessionSnapshot("session-1", "D:/repo/session.jsonl")
@@ -117,6 +127,7 @@ def test_default_registry_contains_builtin_commands_including_skill() -> None:
         "session": CommandKind.LOCAL,
         "skill": CommandKind.LOCAL,
         "status": CommandKind.LOCAL,
+        "tasks": CommandKind.LOCAL,
     }
 
     visible = registry.visible_commands()
@@ -133,7 +144,7 @@ async def test_help_lists_visible_commands_sorted_by_name() -> None:
     event = result.command_result.events[0]
     assert isinstance(event, CommandHelp)
     assert [entry.name for entry in event.entries] == sorted(entry.name for entry in event.entries)
-    assert len(event.entries) == 14
+    assert len(event.entries) == 15
 
 
 @pytest.mark.asyncio
@@ -145,6 +156,7 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
     permission = await _dispatch("/permission", conversation)
     hooks = await _dispatch("/hooks", conversation)
     session = await _dispatch("/session", conversation)
+    tasks = await _dispatch("/tasks", conversation)
 
     assert isinstance(status.command_result.events[0], CommandStatus)  # type: ignore[union-attr]
     assert status.command_result.events[0].model_name == "model-x"  # type: ignore[union-attr]
@@ -154,6 +166,20 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
     assert hooks.command_result.events == (HookListEvent((), "D:/repo/.okcode/hooks.yaml"),)  # type: ignore[union-attr]
     assert isinstance(session.command_result.events[0], CommandSession)  # type: ignore[union-attr]
     assert session.command_result.events[0].session_id == "session-1"  # type: ignore[union-attr]
+    assert tasks.command_result.events == (AgentTaskListEvent(()),)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_tasks_control_commands_call_conversation_port() -> None:
+    conversation = DummyConversation()
+
+    cancel = await _dispatch("/tasks cancel abc", conversation)
+    background = await _dispatch("/tasks background abc", conversation)
+    bad = await _dispatch("/tasks nope", conversation)
+
+    assert cancel.command_result.events == (CommandNotice("cancel abc"),)  # type: ignore[union-attr]
+    assert background.command_result.events == (CommandNotice("background abc"),)  # type: ignore[union-attr]
+    assert "用法" in bad.command_result.events[0].message  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
