@@ -16,6 +16,7 @@ from okcode.models import (
     ProviderConfig,
     ProviderProtocol,
     Role,
+    SessionHistoryEvent,
     StreamCompleted,
     TextDelta,
 )
@@ -213,6 +214,12 @@ def test_resume_selected_session_replaces_new_history_before_next_turn(tmp_path:
         runner.close()
 
     assert len(ui.resumable_sessions) == 1
+    assert any(
+        isinstance(event, SessionHistoryEvent)
+        and [message.content for message in event.messages]
+        == ["旧问题", "旧回答"]
+        for event in ui.deltas
+    )
     assert [message.content for message in provider.requests[0]] == ["旧问题", "旧回答", "继续任务"]
 
 

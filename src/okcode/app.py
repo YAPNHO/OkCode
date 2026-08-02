@@ -122,7 +122,12 @@ class OkCodeApp:
             if callable(clear):
                 clear()
         elif result.ui_action is CommandUiAction.SELECT_SESSION:
-            session_id = self._ui.select_session(self._conversation.list_resumable_sessions())
+            sessions = self._conversation.list_resumable_sessions()
+            select_session_async = getattr(self._ui, "select_session_async", None)
+            if callable(select_session_async):
+                session_id = await select_session_async(sessions)
+            else:
+                session_id = self._ui.select_session(sessions)
             if session_id is not None:
                 await self._consume_events(
                     self._conversation.restore_session(session_id),

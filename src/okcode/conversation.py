@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import platform as host_platform
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -36,13 +37,17 @@ from okcode.models import (
     AgentTaskListEntry,
     AgentTaskListEvent,
     AgentTaskNotice,
+    AppConfig,
     ChatMessage,
     CommandNotice,
     HookListEvent,
     PermissionStatus,
     ProviderRequest,
     Role,
+    SessionHistoryEvent,
     StreamCompleted,
+    TeamStatusEntry,
+    TeamStatusEvent,
     TokenUsage,
     TokenUsageReported,
     ToolCall,
@@ -63,6 +68,11 @@ from okcode.prompt import (
 )
 from okcode.providers.base import LLMProvider
 from okcode.sessions import SessionDescriptor, SessionJournal, SessionStore
+from okcode.teams.coordinator import CoordinatorPolicy, GuardedRunCommandTool
+from okcode.teams.models import TeamActorKind, TeamTaskStatus, TeamToolContext
+from okcode.teams.notifications import TeamNotificationBridge
+from okcode.teams.runtime import TeamRuntime
+from okcode.tools.defaults import build_team_registry
 from okcode.tools.executor import PreparedToolCall, ToolExecutor
 from okcode.tools.models import ToolDefinition, ToolErrorCode, ToolExecutionResult, ToolSafety
 from okcode.tools.registry import ToolRegistry
@@ -117,8 +127,14 @@ class ConversationSession:
         hooks: HookRuntime | None = None,
         initial_messages: Sequence[ChatMessage] = (),
         agent_task_manager: AgentTaskManager | None = None,
+        app_config: AppConfig | None = None,
+        team_runtime: TeamRuntime | None = None,
+        team_context: TeamToolContext | None = None,
+        coordinator_policy: CoordinatorPolicy | None = None,
     ) -> None:
         self._provider = provider
+        self._base_registry = registry
+        self._base_executor = executor
         self._registry = registry
         self._executor = executor
         self._config = config or AgentConfig()
@@ -138,6 +154,15 @@ class ConversationSession:
         self._hooks = hooks
         self._agent_task_manager = agent_task_manager
         self._agent_notification_bridge = AgentNotificationBridge()
+        self._app_config = app_config
+        self._team_runtime = team_runtime
+        self._team_context = team_context
+        self._coordinator_policy = coordinator_policy or CoordinatorPolicy()
+        self._team_notification_bridge = (
+            TeamNotificationBridge(team_runtime.store, team_runtime.mailbox)
+            if team_runtime is not None
+            else None
+        )
         self._messages: tuple[ChatMessage, ...] = tuple(initial_messages)
         self._saved_plan: SavedPlan | None = None
         self._resumption_notice: str | None = None
@@ -231,7 +256,7 @@ class ConversationSession:
             self.permission_string(),
             self._cumulative_input_tokens,
             self._cumulative_output_tokens,
-            len(self._registry.definitions()),
+            len(self._effective_registry().definitions()),
             len(memory.project_memory_files) + len(memory.user_memory_files),
             self._model_name,
             str(self._workspace_root),
@@ -239,6 +264,57 @@ class ConversationSession:
             self._child_output_tokens,
             self._child_tool_calls,
         )
+
+    def create_team(self, name: str) -> TurnEvent:
+        if self._team_runtime is None:
+            return CommandNotice("当前会话未启用 TeamRuntime。")
+        try:
+            snapshot = self._team_runtime.create_team(name, self.session_snapshot().session_id)
+        except Exception as exc:
+            return CommandNotice(f"创建团队失败：{exc}")
+        self._team_context = TeamToolContext(
+            snapshot.metadata.name,
+            "lead",
+            TeamActorKind.LEAD,
+            coordinator=self._coordinator_enabled(),
+        )
+        return self._team_status_event(snapshot, f"已创建并进入团队：{snapshot.metadata.name}")
+
+    def use_team(self, name: str) -> TurnEvent:
+        if self._team_runtime is None:
+            return CommandNotice("当前会话未启用 TeamRuntime。")
+        try:
+            snapshot = self._team_runtime.use_team(name, self.session_snapshot().session_id)
+        except Exception as exc:
+            return CommandNotice(f"进入团队失败：{exc}")
+        self._team_context = TeamToolContext(
+            snapshot.metadata.name,
+            "lead",
+            TeamActorKind.LEAD,
+            coordinator=self._coordinator_enabled(),
+        )
+        return self._team_status_event(snapshot, f"已进入团队：{snapshot.metadata.name}")
+
+    def leave_team(self) -> TurnEvent:
+        if self._team_context is None:
+            return CommandNotice("当前没有团队上下文。")
+        name = self._team_context.team_name
+        self._team_context = None
+        return CommandNotice(f"已离开团队：{name}")
+
+    def team_status_event(self) -> TurnEvent:
+        if self._team_runtime is None:
+            return CommandNotice("当前会话未启用 TeamRuntime。")
+        context = self._active_team_context()
+        if context is None:
+            return CommandNotice(
+                "当前没有团队上下文。请使用 /team create <name> 或 /team use <name>。"
+            )
+        try:
+            snapshot = self._team_runtime.snapshot(context.team_name)
+        except Exception as exc:
+            return CommandNotice(f"读取团队状态失败：{exc}")
+        return self._team_status_event(snapshot)
 
     def agent_task_list_event(self) -> AgentTaskListEvent:
         """返回后台子 Agent 任务列表。"""
@@ -350,6 +426,7 @@ class ConversationSession:
                 self._context_manager.state = previous_state
                 yield stopped
                 return
+        yield SessionHistoryEvent(recovered.messages)
         yield AgentProgress("会话历史已恢复。")
 
     async def stream_turn(self, user_text: str) -> AsyncIterator[TurnEvent]:
@@ -376,7 +453,7 @@ class ConversationSession:
             async for event in self.stream_manual_compaction():
                 yield event
             return
-        if command in {"/permission", "/permissions"}:
+        if command == "/permission":
             async for event in self._handle_permissions_command(stripped):
                 yield event
             return
@@ -392,25 +469,34 @@ class ConversationSession:
     ) -> AsyncIterator[TurnEvent]:
         """按当前或指定运行时模式执行一轮普通用户消息。"""
 
-        actual_mode = mode or self._runtime_mode
-        actual_scope = tool_scope or ToolScope.CURRENT_MODE
-        if actual_scope is ToolScope.READ_ONLY or (
-            actual_scope is ToolScope.CURRENT_MODE and actual_mode is RuntimeMode.PLAN
-        ):
-            tools = self._registry.definitions_by_safety(ToolSafety.READ_ONLY)
-        else:
-            tools = self._registry.definitions()
-        turn_kind = TurnKind.PLAN if actual_mode is RuntimeMode.PLAN else TurnKind.NORMAL
-        save_plan_task = user_text if actual_mode is RuntimeMode.PLAN else None
-        user_message = ChatMessage(role=Role.USER, content=user_text)
-        async for event in self._stream_hooked_agent(
-            user_message,
-            tools,
-            save_plan_task=save_plan_task,
-            turn_kind=turn_kind,
-            runtime_mode=actual_mode,
-        ):
-            yield event
+        previous_registry = self._registry
+        previous_executor = self._executor
+        effective_registry = self._effective_registry()
+        self._registry = effective_registry
+        self._executor = self._executor_for(effective_registry)
+        try:
+            actual_mode = mode or self._runtime_mode
+            actual_scope = tool_scope or ToolScope.CURRENT_MODE
+            if actual_scope is ToolScope.READ_ONLY or (
+                actual_scope is ToolScope.CURRENT_MODE and actual_mode is RuntimeMode.PLAN
+            ):
+                tools = self._registry.definitions_by_safety(ToolSafety.READ_ONLY)
+            else:
+                tools = self._registry.definitions()
+            turn_kind = TurnKind.PLAN if actual_mode is RuntimeMode.PLAN else TurnKind.NORMAL
+            save_plan_task = user_text if actual_mode is RuntimeMode.PLAN else None
+            user_message = ChatMessage(role=Role.USER, content=user_text)
+            async for event in self._stream_hooked_agent(
+                user_message,
+                tools,
+                save_plan_task=save_plan_task,
+                turn_kind=turn_kind,
+                runtime_mode=actual_mode,
+            ):
+                yield event
+        finally:
+            self._registry = previous_registry
+            self._executor = previous_executor
 
     async def stream_do_instruction(self) -> AsyncIterator[TurnEvent]:
         """执行本阶段前 /do 的外部行为。"""
@@ -425,13 +511,22 @@ class ConversationSession:
             role=Role.USER,
             content="请执行当前会话最近一次计划：\n" + self._saved_plan.content,
         )
-        async for event in self._stream_hooked_agent(
-            user_message,
-            self._registry.definitions(),
-            turn_kind=TurnKind.DO,
-            runtime_mode=RuntimeMode.DEFAULT,
-        ):
-            yield event
+        previous_registry = self._registry
+        previous_executor = self._executor
+        effective_registry = self._effective_registry()
+        self._registry = effective_registry
+        self._executor = self._executor_for(effective_registry)
+        try:
+            async for event in self._stream_hooked_agent(
+                user_message,
+                self._registry.definitions(),
+                turn_kind=TurnKind.DO,
+                runtime_mode=RuntimeMode.DEFAULT,
+            ):
+                yield event
+        finally:
+            self._registry = previous_registry
+            self._executor = previous_executor
 
     async def _stream_hooked_agent(
         self,
@@ -688,6 +783,36 @@ class ConversationSession:
                         *instructions,
                     ),
                 )
+        team_context = self._active_team_context()
+        if team_context is not None:
+            instructions = [
+                SystemInstruction(
+                    "team_context",
+                    (
+                        f"当前会话处于长期团队 {team_context.team_name} 中。"
+                        f"你的团队身份是 {team_context.actor_kind.value}:"
+                        f"{team_context.actor_name}。"
+                        "请通过 team_task、team_message、team_member 和 team_merge 协调团队工作。"
+                    ),
+                    priority=86,
+                )
+            ]
+            if self._team_notification_bridge is not None:
+                instructions.extend(
+                    self._team_notification_bridge.instructions_for(
+                        team_context.team_name,
+                        team_context.actor_name,
+                    )
+                )
+            if team_context.coordinator:
+                instructions.append(self._coordinator_policy.build_instruction())
+            context = replace(
+                context,
+                additional_system_instructions=(
+                    *context.additional_system_instructions,
+                    *instructions,
+                ),
+            )
         prompt = self._prompt_builder.build(context, visible_tools)
         return ProviderRequest(
             messages=(*self._messages, *pending),
@@ -726,6 +851,79 @@ class ConversationSession:
                 )
             )
         return self._registry.definitions_by_names(names)
+
+    def _active_team_context(self) -> TeamToolContext | None:
+        if self._team_context is None:
+            return None
+        return replace(self._team_context, coordinator=self._coordinator_enabled())
+
+    def _coordinator_enabled(self) -> bool:
+        return (
+            self._app_config is not None
+            and self._coordinator_policy.is_enabled(self._app_config, os.environ)
+        )
+
+    def _effective_registry(self) -> ToolRegistry:
+        registry = self._base_registry
+        context = self._active_team_context()
+        if self._team_runtime is not None and context is not None:
+            registry = build_team_registry(
+                self._base_registry,
+                runtime=self._team_runtime,
+                context=context,
+            )
+        if context is not None and context.coordinator:
+            registry = self._coordinator_registry(registry)
+        return registry
+
+    def _coordinator_registry(self, source: ToolRegistry) -> ToolRegistry:
+        registry = ToolRegistry()
+        for name in self._coordinator_policy.filter_tool_names(source):
+            tool = source.get(name)
+            if tool is None:
+                continue
+            if name == "run_command":
+                registry.register(GuardedRunCommandTool(tool))
+            else:
+                registry.register(tool)
+        return registry
+
+    def _executor_for(self, registry: ToolRegistry) -> ToolExecutor:
+        if registry is self._base_registry:
+            return self._base_executor
+        return ToolExecutor(registry, permissions=self._permissions, hooks=self._hooks)
+
+    def _team_status_event(
+        self,
+        snapshot: object,
+        message: str | None = None,
+    ) -> TeamStatusEvent:
+        metadata = getattr(snapshot, "metadata")
+        members = tuple(
+            TeamStatusEntry(
+                member.name,
+                member.role,
+                member.backend.value,
+                member.status.value,
+                int(getattr(snapshot, "unread_counts", {}).get(member.name, 0)),
+                bool(getattr(snapshot, "recoverable", {}).get(member.name, False)),
+            )
+            for member in getattr(snapshot, "members", ())
+        )
+        blocked = sum(
+            1
+            for task in getattr(snapshot, "tasks", ())
+            if task.status is TeamTaskStatus.BLOCKED
+        )
+        return TeamStatusEvent(
+            metadata.name,
+            metadata.leader_session_id,
+            members,
+            len(getattr(snapshot, "tasks", ())),
+            blocked,
+            metadata.updated_at.isoformat(),
+            message,
+        )
 
     async def _compact_recovered_history(self) -> AgentStopped | None:
         """恢复历史超预算时执行且仅执行一次摘要请求。"""
@@ -908,7 +1106,7 @@ class ConversationSession:
         if len(parts) == 2:
             yield self.set_permission_mode(parts[1])
             return
-        yield self.permission_status("用法：/permissions [strict|default|allow]")
+        yield self.permission_status("用法：/permission [strict|default|allow]")
 
     def _permission_status(self, message: str | None = None) -> PermissionStatus:
         assert self._permissions is not None

@@ -38,3 +38,22 @@ def build_child_registry(parent: ToolRegistry, workspace: Workspace) -> ToolRegi
         if tool is not None:
             registry.register(tool)
     return registry
+
+
+def build_team_registry(
+    parent: ToolRegistry,
+    *,
+    runtime: object | None = None,
+    context: object | None = None,
+) -> ToolRegistry:
+    """在父 registry 基础上按团队上下文注入团队工具。"""
+
+    from okcode.teams.tools import register_team_tools
+
+    registry = ToolRegistry()
+    for definition in parent.definitions():
+        tool = parent.get(definition.name)
+        if tool is not None:
+            registry.register(tool)
+    register_team_tools(registry, runtime, context)
+    return registry

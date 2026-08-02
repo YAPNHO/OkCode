@@ -130,6 +130,25 @@ def tasks_command(context: CommandContext, command: ParsedCommand) -> CommandRes
     )
 
 
+def team_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
+    args = command.args.strip().split()
+    if not args or args[0] == "status":
+        return CommandResult(events=(context.conversation.team_status_event(),))
+    if len(args) == 2 and args[0] == "create":
+        return CommandResult(events=(context.conversation.create_team(args[1]),))
+    if len(args) == 2 and args[0] == "use":
+        return CommandResult(events=(context.conversation.use_team(args[1]),))
+    if len(args) == 1 and args[0] == "leave":
+        return CommandResult(events=(context.conversation.leave_team(),))
+    return CommandResult(
+        events=(
+            CommandNotice(
+                "用法：/team、/team create <name>、/team use <name>、/team leave 或 /team status"
+            ),
+        )
+    )
+
+
 def session_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
     snapshot = context.conversation.session_snapshot()
     return CommandResult(events=(CommandSession(snapshot.session_id, snapshot.journal_path),))

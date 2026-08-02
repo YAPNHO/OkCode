@@ -18,6 +18,7 @@ from okcode.commands.handlers import (
     skill_command,
     status_command,
     tasks_command,
+    team_command,
 )
 from okcode.commands.models import CommandDefinition, CommandKind
 from okcode.commands.registry import CommandRegistry
@@ -120,7 +121,7 @@ def build_default_command_registry() -> CommandRegistry:
             ),
             CommandDefinition(
                 "permission",
-                ("permissions",),
+                (),
                 "显示或修改当前权限模式。",
                 "/permission [strict|default|allow]",
                 CommandKind.LOCAL,
@@ -147,6 +148,16 @@ def build_default_command_registry() -> CommandRegistry:
                 None,
                 False,
                 tasks_command,
+            ),
+            CommandDefinition(
+                "team",
+                (),
+                "创建、恢复或查询 Team Lead 小组。",
+                "/team [create|use|leave|status <name>]",
+                CommandKind.LOCAL,
+                "create|use|leave|status",
+                False,
+                team_command,
             ),
             CommandDefinition(
                 "session",

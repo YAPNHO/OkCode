@@ -95,7 +95,11 @@ async def test_effective_skills_are_visible_as_dynamic_commands_without_exposing
         "review",
         "test",
     }
-    assert [item.text for item in registry.completion_candidates("t")] == ["/tasks", "/test"]
+    assert [item.text for item in registry.completion_candidates("t")] == [
+        "/tasks",
+        "/team",
+        "/test",
+    ]
     completions = list(
         SlashCommandCompleter(registry).get_completions(
             Document("/co"), CompleteEvent(completion_requested=True)

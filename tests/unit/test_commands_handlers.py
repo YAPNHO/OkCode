@@ -88,6 +88,18 @@ class DummyConversation:
     def background_agent_task(self, task_id: str) -> TurnEvent:
         return CommandNotice(f"background {task_id}")
 
+    def create_team(self, name: str) -> TurnEvent:
+        return CommandNotice(f"team create {name}")
+
+    def use_team(self, name: str) -> TurnEvent:
+        return CommandNotice(f"team use {name}")
+
+    def leave_team(self) -> TurnEvent:
+        return CommandNotice("team leave")
+
+    def team_status_event(self) -> TurnEvent:
+        return CommandNotice("team status")
+
     def session_snapshot(self) -> CommandSessionSnapshot:
         return CommandSessionSnapshot("session-1", "D:/repo/session.jsonl")
 
@@ -146,13 +158,14 @@ def test_default_registry_contains_builtin_commands_including_skill() -> None:
         "skill": CommandKind.LOCAL,
         "status": CommandKind.LOCAL,
         "tasks": CommandKind.LOCAL,
+        "team": CommandKind.LOCAL,
     }
 
     visible = registry.visible_commands()
 
     assert [command.name for command in visible] == sorted(expected)
     assert {command.name: command.kind for command in visible} == expected
-    assert registry.resolve("permissions") is registry.resolve("permission")
+    assert registry.resolve("permissions") is None
 
 
 @pytest.mark.asyncio
@@ -163,7 +176,7 @@ async def test_help_lists_visible_commands_sorted_by_name() -> None:
     event = result.command_result.events[0]
     assert isinstance(event, CommandHelp)
     assert [entry.name for entry in event.entries] == sorted(entry.name for entry in event.entries)
-    assert len(event.entries) == 15
+    assert len(event.entries) == 16
 
 
 @pytest.mark.asyncio
@@ -190,19 +203,22 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permission_command_updates_mode_and_accepts_plural_alias() -> None:
+async def test_permission_command_updates_mode_without_plural_alias() -> None:
     conversation = DummyConversation()
 
     allow = await _dispatch("/permission allow", conversation)
-    plural = await _dispatch("/permissions strict", conversation)
+    unknown = await _dispatch("/permissions strict", conversation)
     invalid = await _dispatch("/permission unsafe", conversation)
     bad_usage = await _dispatch("/permission allow now", conversation)
 
-    assert conversation.permission_mode == "strict"
+    assert conversation.permission_mode == "allow"
     assert allow.command_result.events[0].current_mode == "allow"  # type: ignore[union-attr]
     assert allow.command_result.events[0].message == "权限模式已更新。"  # type: ignore[union-attr]
-    assert plural.command_result.events[0].current_mode == "strict"  # type: ignore[union-attr]
-    assert invalid.command_result.events[0].current_mode == "strict"  # type: ignore[union-attr]
+    assert isinstance(unknown.command_result.events[0], CommandNotice)  # type: ignore[union-attr]
+    assert unknown.command_result.events[0].message == (  # type: ignore[union-attr]
+        "未知命令：/permissions。输入 /help 查看可用命令。"
+    )
+    assert invalid.command_result.events[0].current_mode == "allow"  # type: ignore[union-attr]
     assert invalid.command_result.events[0].message == "权限模式只能是 strict、default 或 allow。"  # type: ignore[union-attr]
     assert bad_usage.command_result.events[0].message == "用法：/permission [strict|default|allow]"  # type: ignore[union-attr]
 
@@ -218,6 +234,23 @@ async def test_tasks_control_commands_call_conversation_port() -> None:
     assert cancel.command_result.events == (CommandNotice("cancel abc"),)  # type: ignore[union-attr]
     assert background.command_result.events == (CommandNotice("background abc"),)  # type: ignore[union-attr]
     assert "用法" in bad.command_result.events[0].message  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_team_commands_call_conversation_port() -> None:
+    conversation = DummyConversation()
+
+    status = await _dispatch("/team", conversation)
+    create = await _dispatch("/team create core", conversation)
+    use = await _dispatch("/team use core", conversation)
+    leave = await _dispatch("/team leave", conversation)
+    bad = await _dispatch("/team create", conversation)
+
+    assert status.command_result.events == (CommandNotice("team status"),)  # type: ignore[union-attr]
+    assert create.command_result.events == (CommandNotice("team create core"),)  # type: ignore[union-attr]
+    assert use.command_result.events == (CommandNotice("team use core"),)  # type: ignore[union-attr]
+    assert leave.command_result.events == (CommandNotice("team leave"),)  # type: ignore[union-attr]
+    assert "team create" in bad.command_result.events[0].message  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,10 @@ class FakeTerminal:
         self.resumable_sessions.append(tuple(sessions))
         return next(self._resume_choices, None)
 
+    async def select_session_async(self, sessions: Sequence[SessionDescriptor]) -> str | None:
+        self.resumable_sessions.append(tuple(sessions))
+        return next(self._resume_choices, None)
+
     def render_delta(self, event: object) -> None:
         self.deltas.append(event)
 

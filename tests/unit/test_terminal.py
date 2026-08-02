@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from io import StringIO
@@ -12,11 +13,17 @@ from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
+    ChatMessage,
+    CoordinatorStatus,
     HookListEntry,
     HookListEvent,
     PermissionStatus,
+    Role,
+    SessionHistoryEvent,
     SkillListEntry,
     SkillListEvent,
+    TeamStatusEntry,
+    TeamStatusEvent,
     TextDelta,
     ThinkingDelta,
     TokenUsage,
@@ -130,6 +137,16 @@ def test_session_selector_handles_empty_list_and_cancellation() -> None:
     assert "\u5df2\u53d6\u6d88\u6062\u590d\u3002" in _plain_text(cancelled_output)
 
 
+def test_async_session_selector_works_inside_running_event_loop() -> None:
+    async def run_selector() -> str | None:
+        ui, output = _ui(["1"])
+        selected = await ui.select_session_async((_session_descriptor(),))
+        assert "\u53ef\u6062\u590d\u4f1a\u8bdd" in _plain_text(output)
+        return selected
+
+    assert asyncio.run(run_selector()) == "20260730-100000-abcd"
+
+
 def test_error_hides_raw_secret() -> None:
     ui, output = _ui()
     ui.show_error(ProviderError(ProviderErrorKind.BAD_REQUEST, "安全消息", status_code=400))
@@ -194,6 +211,26 @@ def test_agent_events_show_progress_usage_and_stop_message() -> None:
     assert "停止：没有可执行的计划" in text
 
 
+def test_restored_session_history_renders_user_and_assistant_messages() -> None:
+    ui, output = _ui(width=80)
+    ui.render_event(
+        SessionHistoryEvent(
+            (
+                ChatMessage(Role.USER, "之前的问题"),
+                ChatMessage(Role.ASSISTANT, "之前的回答"),
+            )
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "已恢复会话历史" in text
+    assert "用户：" in text
+    assert "之前的问题" in text
+    assert "助手：" in text
+    assert "之前的回答" in text
+
+
 def test_skill_list_renders_metadata_activation_and_issues() -> None:
     ui, output = _ui(width=120)
     ui.render_event(
@@ -254,6 +291,69 @@ def test_hook_list_renders_empty_state_and_loaded_rules() -> None:
     assert "shell" in text
     assert "notify-agent" in text
     assert "占位" in text
+
+
+def test_team_status_renders_summary_members_unread_and_recovery() -> None:
+    ui, output = _ui(width=140)
+    ui.render_event(
+        TeamStatusEvent(
+            team_name="core",
+            leader_session_id="lead-session",
+            members=(
+                TeamStatusEntry("worker", "builder", "coroutine", "idle", 2, True),
+                TeamStatusEntry("reviewer", "review", "terminal_pane", "blocked", 0, False),
+            ),
+            task_count=3,
+            blocked_task_count=1,
+            updated_at="2026-08-02T10:00:00+00:00",
+            message="团队状态",
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "团队状态" in text
+    assert "团队" in text
+    assert "core" in text
+    assert "lead-session" in text
+    assert "worker" in text
+    assert "reviewer" in text
+    assert "未读" in text
+    assert "可恢复" in text
+    assert "2" in text
+    assert "是" in text
+    assert "否" in text
+
+
+def test_team_status_renders_empty_member_notice() -> None:
+    ui, output = _ui(width=100)
+    ui.render_event(
+        TeamStatusEvent(
+            team_name="empty",
+            leader_session_id="lead-session",
+            members=(),
+            task_count=0,
+            blocked_task_count=0,
+            updated_at="2026-08-02T10:00:00+00:00",
+        )
+    )
+    ui.finish_turn()
+
+    assert "团队成员：当前没有成员。" in _plain_text(output)
+
+
+def test_coordinator_status_renders_enabled_and_disabled_states() -> None:
+    ui, output = _ui(width=100)
+    ui.render_event(CoordinatorStatus(True, "双锁模式生效"))
+    ui.render_event(CoordinatorStatus(False, "等待环境变量"))
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "coordinator" in text
+    assert "已启用" in text
+    assert "未启用" in text
+    assert "双锁模式生效" in text
+    assert "等待环境变量" in text
 
 
 def test_token_usage_shows_real_cache_fields_when_available() -> None:

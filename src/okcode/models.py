@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 from okcode.prompt.builder import PromptBundle
 from okcode.prompt.cache import PromptCachePolicy, PromptCacheUsage
@@ -34,6 +35,7 @@ class AppConfig:
 
     active: str
     providers: tuple[ProviderConfig, ...]
+    team: "TeamFeatureConfig" = field(default_factory=lambda: TeamFeatureConfig())
 
     @property
     def active_provider(self) -> ProviderConfig:
@@ -41,6 +43,17 @@ class AppConfig:
             if provider.name == self.active:
                 return provider
         raise LookupError(f"不存在名为 {self.active!r} 的供应商配置")
+
+
+@dataclass(frozen=True, slots=True)
+class TeamFeatureConfig:
+    """团队协作能力配置。"""
+
+    coordinator_enabled: bool = False
+    teams_root: Path | None = None
+    terminal_backend_priority: tuple[str, ...] = ("windows_terminal", "tmux")
+    mailbox_lock_timeout_seconds: float = 5.0
+    mailbox_stale_lock_seconds: float = 30.0
 
 
 class Role(StrEnum):
@@ -284,6 +297,13 @@ class CommandSession:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionHistoryEvent:
+    """/resume 恢复成功后供终端展示的历史消息。"""
+
+    messages: tuple[ChatMessage, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SkillListEntry:
     """/skill 列表中的一行。"""
 
@@ -362,6 +382,39 @@ class AgentTaskListEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TeamStatusEntry:
+    """团队状态表中的成员行。"""
+
+    name: str
+    role: str
+    backend: str
+    status: str
+    unread_count: int
+    recoverable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TeamStatusEvent:
+    """团队状态命令输出。"""
+
+    team_name: str
+    leader_session_id: str
+    members: tuple[TeamStatusEntry, ...]
+    task_count: int
+    blocked_task_count: int
+    updated_at: str
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorStatus:
+    """coordinator 模式状态提示。"""
+
+    enabled: bool
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeModeChanged:
     """运行时模式切换提示。"""
 
@@ -388,7 +441,10 @@ type TurnEvent = (
     | CommandStatus
     | CommandMemory
     | CommandSession
+    | SessionHistoryEvent
     | SkillListEvent
     | HookListEvent
+    | TeamStatusEvent
+    | CoordinatorStatus
     | RuntimeModeChanged
 )

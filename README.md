@@ -1,38 +1,51 @@
 # OkCode
 
-OkCode 是一个使用 Python 实现的终端 AI 编程助手。它在当前工作目录内协助阅读代码、定位文件、修改文本、执行命令、运行验证，并在模型需要工具时继续执行 Agent Loop，直到得到正式回答或触发安全上限。
+OkCode 是一个使用 Python 编写、运行在 Windows 终端中的 AI 编程助手。它可以在当前项目目录内读取代码、定位问题、修改文件、运行命令和执行验证，也可以通过 MCP、Skill、子 Agent 和长期团队协作扩展能力。
 
-每次启动都会创建新的短期会话，不会自动载入旧对话；但模型请求会加载项目指令、长期记忆索引、当前模式、可见工具和必要环境信息。已完成的短期会话写入项目内 JSONL 存档，只有输入 `/resume` 并选择会话后才恢复旧消息。
+OkCode 默认只访问当前工作区，所有本地文件和命令工具都会绑定到这个工作区。会话、记忆、团队和临时 worktree 都保存在本地，不会自动上传到远端。
 
-## 已实现能力
+## 目录
 
-- 支持 OpenAI 兼容协议和 Anthropic Messages 协议，可通过 YAML 切换 Provider、模型、思考流和提示缓存。
-- 支持流式回答、思考内容展示、Token 用量展示，以及 Provider 返回缓存字段时的缓存读取/写入展示。
-- 内置 Agent Loop：同一轮中可处理多个工具调用，只读工具可并行执行，有副作用工具按顺序执行；每轮用户请求最多允许 12 次模型自主工具循环。
-- 内置 6 项绑定工作区的本地工具：`read_file`、`write_file`、`edit_file`、`find_files`、`search_code`、`run_command`。
-- 支持 MCP Server 工具发现；远端工具以 `mcp__<server>__<tool>` 暴露，并进入统一工具执行、权限和结果回灌链路。
-- 支持 Skill 系统：启动时只暴露 Skill 名称和描述，模型按需调用 `load_skill` 读取完整 SOP；有效 Skill 会注册成动态斜杠命令。
-- 支持子 Agent：可用预定义角色或 fork 当前对话快照；后台任务可用 `/tasks` 查看、后台化或取消。
-- 支持子 Agent worktree 隔离：为任务创建受管理 Git worktree 和独立分支，本地文件/命令工具会绑定到隔离工作区。
-- 支持 Hooks：可在消息、会话、工具和上下文压缩事件上注入 prompt、执行 shell、发送 HTTP 或启动子 Agent。
-- 支持计划与执行模式：`/plan <任务>` 只开放只读工具并保存计划；`/do` 执行当前会话最近一次已保存计划。
-- 内置五层本地工具权限控制：Windows 高危命令黑名单、项目路径沙箱、分层 YAML 规则、会话权限模式和默认确认。
-- 底部状态栏显示当前运行模式和权限模式，例如 `[模式:DEFAULT] [权限:ALLOW]`。
+- [5 分钟开始](#5-分钟开始)
+- [核心能力](#核心能力)
+- [日常命令](#日常命令)
+- [内置工具](#内置工具)
+- [Provider 配置](#provider-配置)
+- [权限控制](#权限控制)
+- [会话与长期记忆](#会话与长期记忆)
+- [MCP](#mcp)
+- [Skill](#skill)
+- [子 Agent 与 Worktree](#子-agent-与-worktree)
+- [Hooks](#hooks)
+- [Team Lead](#team-lead)
+- [隐私与本地数据](#隐私与本地数据)
+- [开发与验证](#开发与验证)
+- [当前边界](#当前边界)
 
-## 安装
+## 5 分钟开始
 
-前置要求：Python 3.12 和 [uv](https://docs.astral.sh/uv/)。
+### 1. 准备环境
+
+- Windows
+- Python 3.12 或更高版本（小于 3.14）
+- [uv](https://docs.astral.sh/uv/)
+- 一个可用的 OpenAI 兼容或 Anthropic API
+
+### 2. 安装依赖
+
+在项目根目录执行：
 
 ```powershell
 uv sync --all-groups
 ```
 
-## Provider 配置
+### 3. 创建 Provider 配置
 
-在启动目录创建 `config.yaml`。该文件含 API Key，已被 `.gitignore` 忽略，不应提交。
+在项目根目录创建 `config.yaml`。`api_key` 只保存在本机，不要提交到 Git：
 
 ```yaml
 active: openai-compatible
+
 providers:
   - name: openai-compatible
     protocol: openai
@@ -42,6 +55,7 @@ providers:
     thinking: false
     prompt_cache: false
 
+  # 使用 Anthropic 时可保留这一项，并把 active 改为 claude
   - name: claude
     protocol: anthropic
     model: your-claude-model
@@ -49,46 +63,21 @@ providers:
     api_key: your-api-key
     thinking: false
     prompt_cache: false
+
+team:
+  coordinator_enabled: false
+  terminal_backend_priority: [terminal_pane, coroutine]
 ```
 
-`active` 必须对应某个 Provider 的 `name`；`protocol` 仅支持 `openai` 和 `anthropic`。`thinking` 默认为 `false`，开启后会向对应协议请求其支持的思考流。
+配置要求：
 
-`prompt_cache` 默认为 `false`。仅当所选 Provider 明确支持提示缓存时才应开启：OkCode 会把稳定系统提示和工具声明作为缓存前缀，把工作区、日期、可用工具和任务模式等动态信息放入系统级补充消息。缓存是否实际命中以 Provider 返回的 usage 字段为准。
+- `active` 必须与某个 Provider 的 `name` 完全一致。
+- `protocol` 只能是 `openai` 或 `anthropic`。
+- `base_url` 必须是有效的 HTTP(S) 地址。
+- `thinking` 和 `prompt_cache` 默认关闭，只有确认当前 Provider 支持时再开启。
+- `team` 配置可以省略；团队默认保存到项目目录下的 `.okcode/team/`。
 
-## MCP Server 配置
-
-MCP Server 与 Provider 配置分开管理。OkCode 会按以下顺序读取 `mcp_servers`，项目级同名 Server 会完整覆盖用户级配置：
-
-| 来源 | 路径 |
-| --- | --- |
-| 用户级 | `%USERPROFILE%/.okcode/config.yaml` |
-| 项目级 | `<项目>/.okcode/config.yaml` |
-
-两份文件都可以缺失。每个配置文件只包含 `mcp_servers`：
-
-```yaml
-mcp_servers:
-  filesystem:
-    transport: stdio
-    command: uvx
-    args: ["@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"]
-    env:
-      API_TOKEN: "${FILESYSTEM_TOKEN}"
-
-  remote_search:
-    transport: streamable_http
-    url: "https://example.com/mcp"
-    headers:
-      Authorization: "Bearer ${SEARCH_TOKEN}"
-```
-
-`args`、`env`、`url` 和 `headers` 的值支持 `${变量名}` 展开；引用未定义变量会以配置错误结束启动，且不会输出变量值。stdio 子进程会继承当前系统环境，配置中的 `env` 仅覆盖同名变量。
-
-发现到的工具名称为 `mcp__<server>__<tool>`，避免与内置工具或其他 Server 冲突。远端工具默认按有副作用处理，因此继续经过权限规则和默认确认。单个 Server 无法连接、握手或发现失败时会显示启动告警，但不会阻止内置工具和其他 MCP Server 使用；当前版本不会自动重连。
-
-## 运行
-
-在希望让 OkCode 操作的项目根目录运行：
+### 4. 启动
 
 ```powershell
 uv run okcode
@@ -100,71 +89,101 @@ uv run okcode
 uv run python -m okcode
 ```
 
-当前工作目录会成为主工作区根目录。文件、搜索和命令工具默认不能访问该目录之外的路径；worktree 子 Agent 会使用自己的隔离工作区根目录。
+### 5. 尝试第一个任务
 
-## 交互命令
+启动后直接用自然语言描述目标，例如：
 
-| 输入 | 行为 |
+```text
+读取 src/okcode/conversation.py，解释它如何处理一轮工具调用，然后运行相关测试。
+```
+
+常见工作流是“先读代码，再修改，最后运行测试”。OkCode 会在模型需要时自动调用工具，并持续执行多轮 Agent Loop。
+
+## 核心能力
+
+| 能力 | 说明 |
 | --- | --- |
-| 普通自然语言任务 | 模型可使用当前模式下可见工具完成阅读、修改和验证。 |
-| `/help` | 显示可用命令；包含动态 Skill 命令。 |
-| `/status` | 显示权限模式、Token 用量、工具数量、记忆数量、模型名和工作目录。 |
-| `/plan <任务>` | 切换到计划模式，只允许读取、查找和搜索工具；成功后保存计划。 |
-| `/do` | 切换回默认模式并执行当前会话最近一次已保存计划。 |
-| `/review` | 发起固定代码审查请求；不会读取 git diff 后再生成 prompt。 |
+| Agent Loop | 在一轮请求中完成多次工具调用，支持流式文本、思考内容和 token 用量展示。 |
+| 文件与命令 | 读取、创建、编辑文件，查找文件和代码，运行当前工作区内的 Windows 命令。 |
+| 计划执行 | `/plan` 只读分析并保存计划，`/do` 执行最近一次计划。 |
+| 权限系统 | 支持 `strict`、`default`、`allow` 三种模式，叠加黑名单、路径边界和 YAML 规则。 |
+| 会话恢复 | 会话以 JSONL 保存在当前项目，使用 `/resume` 恢复。 |
+| 长期记忆 | 在项目级和用户级记忆目录中维护可检索笔记。 |
+| MCP | 发现并注册外部 MCP Server 工具，统一纳入权限和执行链路。 |
+| Skill | 按需加载可复用 SOP，并生成动态斜杠命令。 |
+| 子 Agent | 支持预定义角色、fork 快照、后台任务和 Worktree 隔离。 |
+| Hooks | 在会话、轮次、消息、工具和错误事件上执行 prompt、shell、HTTP 或 subagent 动作。 |
+| Team Lead | 创建长期团队，派生成员，分配任务，通过共享任务列表和邮箱协作。 |
+
+## 日常命令
+
+| 命令 | 用途 |
+| --- | --- |
+| `/help` | 查看内置命令和当前已注册的动态 Skill 命令。 |
+| `/status` | 查看权限模式、token 用量、工具数量、记忆数量、模型和工作区。 |
+| `/plan <任务>` | 进入计划模式，只开放读、查找和搜索工具，并保存计划。 |
+| `/do` | 执行当前会话最近保存的计划。 |
+| `/review` | 发起一次代码审查请求。 |
 | `/compact` | 手动压缩当前上下文。 |
 | `/clear` | 结束当前会话并开启新会话。 |
-| `/resume` | 显示当前项目可恢复会话并按编号选择；回车或 `/cancel` 取消。 |
+| `/resume` | 列出并恢复当前项目中的历史会话。 |
 | `/session` | 显示当前会话标识和日志路径。 |
-| `/memory` | 列出已加载的项目级和用户级记忆文件。 |
-| `/permission` | 显示当前权限模式及用户、项目、本地规则文件路径。 |
-| `/permission strict` | 未命中规则时直接拒绝。 |
-| `/permission default` | 未命中规则时请求确认，默认模式。 |
-| `/permission allow` | 未命中规则时直接放行；黑名单、路径沙箱和 `deny` 规则仍会拒绝。 |
-| `/permissions ...` | `/permission ...` 的兼容别名。 |
-| `/skill` | 列出可加载和已激活的 Skill。 |
-| `/hooks` | 列出已加载 Hook 规则、最近状态和配置路径。 |
-| `/tasks` | 列出后台子 Agent 任务。 |
-| `/tasks background <task_id>` | 将前台任务标记为后台展示。 |
-| `/tasks cancel <task_id>` | 取消后台子 Agent 任务。 |
-| `/exit` 或 EOF | 退出 OkCode。 |
+| `/memory` | 查看当前已加载的项目级和用户级记忆。 |
+| `/permission` | 查看或修改权限模式。可用参数：`strict`、`default`、`allow`。 |
+| `/hooks` | 查看已加载的 Hook 规则和最近状态。 |
+| `/skill` | 查看可加载和已激活的 Skill。 |
+| `/tasks` | 查看后台子 Agent；可使用 `cancel` 或 `background <task_id>` 控制任务。 |
+| `/team` | 查看当前团队状态。配合 `create`、`use`、`leave`、`status` 管理团队。 |
+| `/exit` | 退出 OkCode；EOF 也会执行正常退出清理。 |
 
-输入阶段按 `Ctrl+C` 会清空当前输入；生成阶段按 `Ctrl+C` 会取消本轮，已取消内容不会写入后续会话历史。
+输入阶段按 `Ctrl+C` 可清空当前输入；生成阶段按 `Ctrl+C` 可取消本轮，已取消内容不会写入后续会话历史。
 
-## 会话、指令与长期记忆
+## 内置工具
 
-启动时会创建惰性会话日志，首轮正式回答成功后才在 `<项目>/sessions/` 下创建 `<YYYYMMDD-HHMMSS-xxxx>.jsonl`。每条消息单独追加为一行 JSON，列表中的标题、消息数和最近更新时间均直接扫描日志得到，不维护额外 meta 文件。超过 30 天的日志会在启动和查询时清理。
+普通会话默认提供六个绑定到当前工作区的工具：
 
-输入 `/resume` 后，终端会显示当前项目的可恢复会话表。输入编号恢复该会话；按回车或输入 `/cancel` 保持当前新会话不变。恢复会跳过损坏行，并在工具调用历史不完整时只保留最后一个合法消息边界。相隔较久的会话会在续聊的下一次模型请求前收到一次状态核对提醒。
-
-手写项目指令按以下优先级合并，高优先级文本位于前面：
-
-| 优先级 | 路径 |
+| 工具 | 用途 |
 | --- | --- |
-| 高 | `<项目>/AGENTS.md` |
-| 中 | `<项目>/.okcode/AGENTS.md` |
-| 低 | `%USERPROFILE%/.okcode/AGENTS.md` |
+| `read_file` | 读取文本文件。 |
+| `write_file` | 创建或覆盖文件。 |
+| `edit_file` | 对文件执行精确编辑。 |
+| `find_files` | 按名称或 glob 查找文件。 |
+| `search_code` | 在代码和文本中搜索内容。 |
+| `run_command` | 在当前工作区执行 Windows shell 命令。 |
 
-指令文件可以使用单独一行的 `@include relative/path.md` 引用项目内文件。引用深度受限，循环、绝对路径、包含 `..` 的路径以及解析后跳出项目目录的符号链接均会被拒绝。
+`agent`、`load_skill`、MCP 工具和团队工具会根据当前上下文动态加入。所有工具都经过统一的参数校验、工作区边界检查、权限判断和 Hook 链路。
 
-每轮 Agent 自然结束后，OkCode 在后台使用当前 Provider 更新长期记忆，不会阻塞终端继续输入。记忆统一存于项目内 `<项目>/.okcode/memory/`，其中项目级笔记位于 `project/`，用户级笔记位于 `user/`；笔记分为用户偏好、纠正反馈、项目知识和参考资料。两份索引会在普通请求前注入上下文，并各自限制为 200 行和 25KB。
+## Provider 配置
 
-## 权限规则
+Provider 配置文件是当前启动目录下的 `config.yaml`。OkCode 支持：
 
-OkCode 在每次本地工具实际执行前检查权限。检查顺序固定为：Windows 高危命令黑名单、项目路径沙箱、会话/本地/项目/用户规则、权限模式、人工确认。前两层和命中的 `deny` 规则都是终局拒绝，不能被 `allow` 模式、规则或人工确认放开。
+- OpenAI Chat Completions 兼容协议；
+- Anthropic Messages 协议；
+- 模型名称、API 地址、思考模式和提示缓存开关；
+- 运行时根据 `active` 选择一个 Provider。
 
-文件和目录工具会先解析符号链接或 Windows 重解析点，再确认目标仍位于当前工具绑定的工作区内。主 Agent 绑定主工作区；worktree 子 Agent 绑定隔离 worktree。`run_command` 仍由当前 Windows shell 执行，因此它使用黑名单、规则、模式和人工确认做准入控制，并不提供操作系统级命令沙箱。
+当前版本不会替 Provider 自动重试或切换模型。Provider 配置错误会在启动阶段直接提示，并不会进入半初始化状态。
 
-规则文件按以下优先级查找，越靠前越优先：
+## 权限控制
 
-| 来源 | 路径 | 是否建议提交 |
+权限检查发生在每一次本地工具真正执行之前，顺序固定为：
+
+1. Windows 高风险命令黑名单；
+2. 工作区路径沙箱；
+3. 本地、项目、用户规则；
+4. 当前权限模式；
+5. 需要时的人工确认。
+
+规则文件：
+
+| 范围 | 路径 | 说明 |
 | --- | --- | --- |
-| 当前会话 | 内存规则 | 否，退出 OkCode 后失效 |
-| 项目本地 | `<项目>/.okcode/permissions.local.yaml` | 否，默认被忽略 |
-| 项目共享 | `<项目>/.okcode/permissions.yaml` | 可以提交 |
-| 用户全局 | `%USERPROFILE%/.okcode/permissions.yaml` | 仅本机使用 |
+| 当前会话 | 内存中 | 退出 OkCode 后失效。 |
+| 项目本地 | `<项目>/.okcode/permissions.local.yaml` | 默认忽略，不建议提交。 |
+| 项目共享 | `<项目>/.okcode/permissions.yaml` | 可以随项目提交。 |
+| 用户全局 | `%USERPROFILE%/.okcode/permissions.yaml` | 只在本机生效。 |
 
-规则文件使用 YAML，按声明顺序匹配，首条命中规则生效：
+YAML 规则示例：
 
 ```yaml
 rules:
@@ -176,15 +195,75 @@ rules:
     action: deny
 ```
 
-规则写成 `工具名(模式)` 或只写 `工具名`。`Bash(...)` 是 `run_command(...)` 的兼容别名；模式支持旧版裸精确/裸 glob，也支持显式 `exact:`、`glob:`、`regex:` 和 `not:...` 反向匹配。命令模式匹配完整命令文本；路径模式匹配解析后的工作区相对路径，并统一使用 `/`。
+`deny` 规则和系统黑名单是最终拒绝，不能被 `allow` 或人工确认覆盖。使用 `/permission` 查看或切换权限模式。
 
-在 `default` 模式下，未命中规则的调用会显示工具与命令或工作区相对路径。输入 `d` 拒绝、`o` 仅允许本次、`s` 允许本会话、`p` 永久允许。永久允许只会写入项目本地的 `permissions.local.yaml`；空输入、EOF、中断或无法识别的选择都会安全拒绝。`/exit` 会退出 OkCode，而不是被当成拒绝。
+## 会话与长期记忆
+
+### 会话
+
+成功提交过正式回复的会话会写入：
+
+```text
+<项目>/sessions/<YYYYMMDD-HHMMSS-xxxx>.jsonl
+```
+
+会话日志按行追加 JSON，启动和查询时会清理超过保留期的日志。使用 `/resume` 可以选择历史会话继续工作；损坏或不完整的尾部记录会被跳过。
+
+### 指令文件
+
+项目指令按以下优先级加载：
+
+1. `<项目>/AGENTS.md`
+2. `<项目>/.okcode/AGENTS.md`
+3. `%USERPROFILE%/.okcode/AGENTS.md`
+
+指令文件可以使用 `@include relative/path.md` 引用项目内的补充说明，但不能通过绝对路径或 `..` 跳出项目目录。
+
+### 长期记忆
+
+长期记忆保存在：
+
+```text
+<项目>/.okcode/memory/project/
+<项目>/.okcode/memory/user/
+```
+
+每轮对话结束后，后台记忆 worker 会根据当前 Provider 更新索引；普通请求只注入受限长度的相关记忆。`.okcode/context/` 用于保存上下文压缩等运行时产物。
+
+## MCP
+
+MCP 配置与 Provider 配置分开管理：
+
+| 范围 | 路径 |
+| --- | --- |
+| 用户级 | `%USERPROFILE%/.okcode/config.yaml` |
+| 项目级 | `<项目>/.okcode/config.yaml` |
+
+同名 Server 由项目级配置覆盖用户级配置。支持 `stdio` 和 `streamable_http`：
+
+```yaml
+mcp_servers:
+  filesystem:
+    transport: stdio
+    command: uvx
+    args: ["some-mcp-server", "${WORKSPACE_ROOT}"]
+    env:
+      API_TOKEN: "${FILESYSTEM_TOKEN}"
+
+  remote_search:
+    transport: streamable_http
+    url: "https://example.com/mcp"
+    headers:
+      Authorization: "Bearer ${SEARCH_TOKEN}"
+```
+
+`args`、`env`、`url` 和 `headers` 支持 `${ENV_VAR}` 展开。未定义变量会导致配置错误，但不会输出变量值。MCP 工具名称统一为 `mcp__<server>__<tool>`。单个 Server 发现失败只产生告警，当前版本不会自动重连。
 
 ## Skill
 
-Skill 用于把可复用 SOP 暴露给模型，但启动时只注入名称和描述；模型必须调用 `load_skill` 才能看到完整 SOP。已激活 Skill 使用激活时快照，直到 `/clear` 或重新加载该 Skill 才切换版本。
+Skill 用于向模型提供可复用的 SOP。启动时只加载名称和描述，模型需要调用 `load_skill` 才会读取完整内容，这样可以减少默认上下文。
 
-Skill 根目录按来源优先级加载，项目级覆盖用户级，用户级覆盖内置：
+Skill 来源和优先级：
 
 | 来源 | 路径 |
 | --- | --- |
@@ -192,88 +271,173 @@ Skill 根目录按来源优先级加载，项目级覆盖用户级，用户级�
 | 用户级 | `%USERPROFILE%/.okcode/skills/` |
 | 项目级 | `<项目>/.okcode/skills/` |
 
-每个有效 Skill 会成为动态斜杠命令，例如 `/commit`、`/test`。动态命令不会直接注入 SOP，而是转发一条要求模型先调用 `load_skill` 的请求。静态内置命令优先级更高；例如外部 Skill 不能覆盖内置 `/review`。
+有效 Skill 会生成同名动态命令，例如 `/commit`、`/test`。Skill 激活后使用当前会话快照，修改文件不会自动改变已经激活的 SOP；使用 `/clear` 或重新加载后才会切换版本。
+
+## 子 Agent 与 Worktree
+
+内置角色：
+
+- `general-purpose`：通用代码任务；
+- `code-reviewer`：只读审查和风险分析；
+- `researcher`：只读检索和事实整理。
+
+子 Agent 支持两种启动方式：
+
+- `defined`：使用一个已定义角色；
+- `fork`：基于当前会话快照启动。
+
+执行模式可以是前台、后台或自动选择。后台任务使用 `/tasks` 查看、转后台或取消。
+
+文件隔离模式：
+
+- `shared`：与父会话共用当前工作区；
+- `worktree`：在 `<项目>/.okcode/worktrees/` 下创建 Git worktree 和独立分支。
+
+Worktree 会记录元数据，并在退出或过期清理前检查未提交修改、未推送提交和未跟踪文件，避免误删工作成果。
 
 ## Hooks
 
-Hooks 配置文件固定为 `<项目>/.okcode/hooks.yaml`；缺失文件等价于没有 Hook。支持的事件包括：
+Hooks 配置文件：
 
-- `message.user`
-- `session.start`
-- `session.end`
-- `tool.before`
-- `tool.after`
-- `system.context_compacted`
-
-Hook 条件字段按事件白名单校验，匹配语法与权限规则一致，支持 `exact:`、`glob:`、`regex:` 和 `not:...`。动作支持 `prompt`、`shell`、`http` 和 `subagent`。`tool.before` 可以使用 `intercept: true` 拦截工具调用；权限、参数校验和黑名单仍然先于 Hook 生效。
-
-```yaml
-hooks:
-  - name: block-secret-write
-    event: tool.before
-    if:
-      - field: tool.name
-        match: exact:write_file
-      - field: tool.arguments.path
-        match: regex:.*\\.secret$
-    action:
-      type: shell
-      command: exit 1
-      intercept: true
-      deny_message: 不允许写入 secret 文件。
-    control:
-      timeout_seconds: 5
+```text
+<项目>/.okcode/hooks.yaml
 ```
 
-`/hooks` 会列出当前已加载规则、事件、动作、启用状态、最近运行状态和配置路径。
+支持事件：
 
-## 子 Agent 与 Worktree 隔离
+`session.start`、`session.end`、`turn.start`、`turn.end`、`message.user`、`message.assistant`、`tool.before`、`tool.after`、`system.context_compacted`、`system.error`。
 
-OkCode 内置三个子 Agent 角色：
+支持动作：
 
-| 角色 | 用途 |
-| --- | --- |
-| `general-purpose` | 通用代码库任务，可读写文件、搜索代码并运行命令。 |
-| `code-reviewer` | 审查局部代码变更并返回风险点，只开放读/查/搜工具。 |
-| `researcher` | 搜索代码库并整理局部事实，只开放读/查/搜工具。 |
+- `prompt`：向下一次请求、当前轮次或整个会话注入提示；
+- `shell`：执行受控 shell 命令，可在 `tool.before` 阶段拦截工具；
+- `http`：向外部 HTTP 服务发送事件；
+- `subagent`：在已配置 AgentLauncher 时启动后台子 Agent。
 
-自定义角色按以下路径加载，项目级优先于用户级，用户级优先于内置：
+权限检查、参数校验和系统黑名单先于 Hook 生效。使用 `/hooks` 查看当前加载的规则、配置路径和最近执行状态。
 
-| 来源 | 路径 |
-| --- | --- |
-| 内置 | `src/okcode/agents/builtin_roles/` |
-| 用户级 | `%USERPROFILE%/.okcode/agents/` |
-| 项目级 | `<项目>/.okcode/agents/` |
+## Team Lead
 
-角色 frontmatter 支持 `tools.allow`、`tools.deny`、`model`、`max_turns`、`permission` 和 `isolation`。`permission` 支持 `inherit`、`default`、`strict`、`allow`；`isolation` 支持 `shared` 和 `worktree`。
+Team Lead 是持久化的长期团队协作模式。先进入一个团队：
 
-模型可通过 `agent` 工具启动子 Agent：
+```text
+/team create demo
+/team use demo
+/team status
+/team leave
+```
 
-- `kind=defined`：使用预定义角色；默认可前台运行，也可 `background=true`。
-- `kind=fork`：继承父对话快照，强制后台运行。
-- `isolation=shared`：沿用主工作区；后台任务默认只允许只读工具。
-- `isolation=worktree`：从主仓库 HEAD 创建受管理 Git worktree；文件/搜索/命令工具绑定到隔离路径，后台任务可以在隔离路径内使用写入和命令工具。
+进入团队后，主 Agent 作为 Lead 可以使用：
 
-worktree 默认位于 `<项目>/.okcode/worktrees/`，创建时会复制允许的本地配置、尝试链接大型依赖目录，并写入 `.okcode/worktree.json` 元数据。任务结束时，无变更的 worktree 会自动删除；存在未提交修改、未跟踪文件、未推送提交或状态不可确认时会保留并在任务结果中报告路径、分支、保留原因和变更摘要。
+- `team_member`：创建、审批、唤醒、恢复和终止成员；
+- `team_task`：创建、更新和查看共享任务；
+- `team_message`：点对点发送、广播和读取邮箱消息；
+- `team_merge`：查看成员分支并执行 Git 合并。
 
-注意：Git worktree 只包含 Git 已跟踪的仓库状态，不会自动复制主工作区未提交或未跟踪文件。需要让 worktree 子 Agent 修改的文件应先加入 Git 历史。
+成员默认只能看到 `team_task` 和 `team_message`，用于处理自己的任务和回传结果。
 
-## 开发验证
+### 成员执行流程
+
+1. Lead 创建成员和共享任务；
+2. Lead 发送 `task_assignment` 消息，运行时将消息写入成员邮箱并尝试唤醒成员；
+3. 成员 worker 读取邮箱，启动 AgentRunner，在自己的工作目录中执行任务；
+4. 成员更新任务状态和最近任务摘要，并向 Lead 发送 `completion` 或 `blocked` 消息；
+5. Lead 读取共享状态和邮箱，汇总结果，必要时通过 `team_merge` 合并代码。
+
+成员支持审批请求、任务依赖字段、恢复执行、点对点消息和广播。发送消息保持非阻塞；显式唤醒成员时可以等待当前任务执行结束。
+
+### 团队目录
+
+默认位置是当前项目目录：
+
+```text
+<项目>/.okcode/team/<team>/
+├── team.json
+├── members.json
+├── tasks.json
+├── registry.json
+├── mailboxes/
+└── member-sessions/
+```
+
+可以在 `config.yaml` 中通过 `team.teams_root` 覆盖根目录。团队状态、邮箱和成员摘要都以本地 JSON/JSONL 文件持久化，并使用 lock 文件保护并发写入。
+
+### 成员后端
+
+支持两种成员后端：
+
+- `terminal_pane`：使用 Windows Terminal 或 tmux 的终端窗格，是否可用取决于当前环境；
+- `coroutine`：在 OkCode 进程内运行，始终可用。
+
+后端按 `team.terminal_backend_priority` 选择；显式要求不可用后端时会直接报错，不会静默降级。
+
+### Coordinator 双锁模式
+
+Coordinator 模式必须同时满足配置和环境变量：
+
+```yaml
+team:
+  coordinator_enabled: true
+```
+
+```powershell
+$env:OKCODE_COORDINATOR = "1"
+uv run okcode
+```
+
+启用后，Lead 负责拆解任务、派发成员、审批、跟踪消息和合并代码：
+
+- 隐藏 `write_file`、`edit_file`；
+- 保留读工具、团队工具和受控 `run_command`；
+- `run_command` 会拒绝明显的 shell 写文件命令，但允许 `git status`、`git diff`、`git merge`、`git branch` 等协作命令。
+
+## 隐私与本地数据
+
+以下内容属于用户运行状态或隐私数据，默认已加入 `.gitignore`：
+
+```text
+config.yaml
+sessions/
+.okcode/context/
+.okcode/memory/
+.okcode/team/
+.okcode/worktrees/
+.okcode/permissions.local.yaml
+```
+
+可以提交的项目级配置通常是 `.okcode/permissions.yaml`、`.okcode/hooks.yaml`、`.okcode/skills/` 和 `.okcode/agents/`。提交前请确认没有把 API Key、会话内容、长期记忆或团队邮箱带入 Git。
+
+## 开发与验证
+
+安装开发依赖：
+
+```powershell
+uv sync --all-groups
+```
+
+运行测试、代码检查和补丁检查：
 
 ```powershell
 uv run pytest -q
-uv run ruff format --check .
 uv run ruff check .
+git diff --check
 ```
 
-常用定向验证：
+项目入口：
 
-```powershell
-uv run pytest tests/unit/test_agents_*.py -q
-uv run pytest tests/integration/test_subagent_worktree.py -q
-uv run pytest tests/unit/test_commands_handlers.py tests/unit/test_terminal.py -q
-```
+- `src/okcode/`：应用、会话、Provider、工具、权限、MCP、Skill、Agent、Team 等实现；
+- `tests/unit/`：单元测试；
+- `tests/integration/`：跨模块集成测试；
+- `docs/`：阶段设计文档和验收记录。
 
-## 当前范围
+## 当前边界
 
-当前版本仍不支持 MCP 资源、提示词、采样、根目录协商、OAuth 专用认证、健康检查和自动重连；图片、音频与嵌入资源等非文本工具结果也不会交给模型处理。向量检索、RAG、团队记忆同步和自动化效果评估仍在后续范围。
+当前版本明确不覆盖：
+
+- 跨机器或跨网络的分布式团队；
+- 成员之间的实时流式通信；
+- 复杂的自动任务依赖调度器；
+- 完整的成员历史会话重放；
+- 独立终端进程的自动重启和跨机器恢复。
+
+这些边界不影响本地单项目中的 Agent Loop、MCP、Skill、子 Agent、Worktree 和 Team Lead 基本协作流程。

@@ -26,11 +26,15 @@ from okcode.models import (
     CommandNotice,
     CommandSession,
     CommandStatus,
+    CoordinatorStatus,
     HookListEvent,
     PermissionStatus,
     ProviderConfig,
+    Role,
     RuntimeModeChanged,
+    SessionHistoryEvent,
     SkillListEvent,
+    TeamStatusEvent,
     TextDelta,
     ThinkingDelta,
     TokenUsageReported,
@@ -140,6 +144,69 @@ class TerminalUI:
                 style="yellow",
             )
 
+    async def select_session_async(self, sessions: Sequence[SessionDescriptor]) -> str | None:
+        """在已运行的事件循环中异步选择可恢复会话。"""
+
+        if not sessions:
+            self._console.print(
+                "\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4f1a\u8bdd\u3002", style="dim"
+            )
+            return None
+
+        self._finish_line()
+        table = Table(
+            title="\u53ef\u6062\u590d\u4f1a\u8bdd",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("\u7f16\u53f7", justify="right", no_wrap=True)
+        table.add_column("\u4f1a\u8bdd ID", no_wrap=True)
+        table.add_column("\u6807\u9898")
+        table.add_column("\u6d88\u606f\u6570", justify="right", no_wrap=True)
+        table.add_column("\u6700\u8fd1\u66f4\u65b0", no_wrap=True)
+        for index, session in enumerate(sessions, start=1):
+            table.add_row(
+                str(index),
+                session.id,
+                session.title,
+                str(session.message_count),
+                session.updated_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+            )
+        self._console.print(table)
+
+        while True:
+            try:
+                session = self._session
+                if session is None:
+                    session = self._new_prompt_session()
+                    self._session = session
+                choice = (
+                    await session.prompt_async(
+                        "\u6062\u590d\u7f16\u53f7\uff08\u56de\u8f66\u6216 /cancel "
+                        "\u53d6\u6d88\uff09> "
+                    )
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                self._console.print("\u5df2\u53d6\u6d88\u6062\u590d\u3002", style="dim")
+                return None
+            if not choice or choice.lower() == "/cancel":
+                self._console.print("\u5df2\u53d6\u6d88\u6062\u590d\u3002", style="dim")
+                return None
+            try:
+                index = int(choice)
+            except ValueError:
+                self._console.print(
+                    "\u8bf7\u8f93\u5165\u4f1a\u8bdd\u7f16\u53f7\uff0c\u6216\u6309\u56de\u8f66\u53d6\u6d88\u3002",
+                    style="yellow",
+                )
+                continue
+            if 1 <= index <= len(sessions):
+                return sessions[index - 1].id
+            self._console.print(
+                "\u4f1a\u8bdd\u7f16\u53f7\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002",
+                style="yellow",
+            )
+
     async def confirm_permission(self, request: PermissionRequest) -> PermissionConfirmation:
         """在运行中的事件循环内等待一次明确的用户决定。"""
 
@@ -205,10 +272,16 @@ class TerminalUI:
             self._render_command_memory(event)
         elif isinstance(event, CommandSession):
             self._render_command_session(event)
+        elif isinstance(event, SessionHistoryEvent):
+            self._render_session_history(event)
         elif isinstance(event, HookListEvent):
             self._render_hook_list(event)
         elif isinstance(event, SkillListEvent):
             self._render_skill_list(event)
+        elif isinstance(event, TeamStatusEvent):
+            self._render_team_status(event)
+        elif isinstance(event, CoordinatorStatus):
+            self._render_coordinator_status(event)
         elif isinstance(event, RuntimeModeChanged):
             self._render_runtime_mode_changed(event)
 
@@ -423,6 +496,49 @@ class TerminalUI:
         self._console.print(table)
         self._turn_open = True
 
+    def _render_team_status(self, event: TeamStatusEvent) -> None:
+        self._finish_line()
+        if event.message:
+            self._console.print(event.message, style="cyan")
+        summary = Table(show_header=False)
+        summary.add_column("字段", no_wrap=True)
+        summary.add_column("值")
+        summary.add_row("团队", event.team_name)
+        summary.add_row("Lead 会话", event.leader_session_id or "-")
+        summary.add_row("任务数", str(event.task_count))
+        summary.add_row("阻塞任务", str(event.blocked_task_count))
+        summary.add_row("最近更新", event.updated_at)
+        self._console.print(summary)
+        if not event.members:
+            self._console.print("团队成员：当前没有成员。", style="dim")
+            self._turn_open = True
+            return
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("成员", no_wrap=True)
+        table.add_column("角色", no_wrap=True)
+        table.add_column("后端", no_wrap=True)
+        table.add_column("状态", no_wrap=True)
+        table.add_column("未读", justify="right", no_wrap=True)
+        table.add_column("可恢复", no_wrap=True)
+        for member in event.members:
+            table.add_row(
+                member.name,
+                member.role,
+                member.backend,
+                member.status,
+                str(member.unread_count),
+                "是" if member.recoverable else "否",
+            )
+        self._console.print(table)
+        self._turn_open = True
+
+    def _render_coordinator_status(self, event: CoordinatorStatus) -> None:
+        self._finish_line()
+        style = "cyan" if event.enabled else "dim"
+        marker = "已启用" if event.enabled else "未启用"
+        self._console.print(f"coordinator：{marker}。{event.message}", style=style)
+        self._turn_open = True
+
     def _render_agent_task_notice(self, event: AgentTaskNotice) -> None:
         self._finish_line()
         role = f" / {event.role_name}" if event.role_name else ""
@@ -477,6 +593,40 @@ class TerminalUI:
         self._finish_line()
         self._console.print(f"会话 ID：{event.session_id or '（未启用）'}", style="dim")
         self._console.print(f"存档文件：{event.journal_path or '（未启用）'}", style="dim")
+        self._turn_open = True
+
+    def _render_session_history(self, event: SessionHistoryEvent) -> None:
+        """展示恢复会话中的可读消息，避免恢复成功后终端仍然没有上下文。"""
+
+        self._finish_line()
+        self._console.print("已恢复会话历史：", style="bold cyan")
+        displayed = False
+        for message in event.messages:
+            if message.role is Role.USER:
+                self._console.print("用户：", style="bold green")
+                self._console.print(
+                    message.content,
+                    markup=False,
+                    highlight=False,
+                    soft_wrap=True,
+                )
+                displayed = True
+            elif message.role is Role.ASSISTANT:
+                if message.content:
+                    self._console.print("助手：", style="bold magenta")
+                    self._console.print(
+                        message.content,
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
+                    )
+                    displayed = True
+                elif message.tool_calls:
+                    tool_names = "、".join(call.name for call in message.tool_calls)
+                    self._console.print(f"助手调用工具：{tool_names}", style="dim")
+                    displayed = True
+        if not displayed:
+            self._console.print("（历史中没有可显示的文本消息。）", style="dim")
         self._turn_open = True
 
     def _render_hook_list(self, event: HookListEvent) -> None:

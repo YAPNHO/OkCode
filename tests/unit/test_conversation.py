@@ -31,6 +31,7 @@ from okcode.models import (
     ChatMessage,
     CommandNotice,
     Role,
+    SessionHistoryEvent,
     StreamCompleted,
     TextDelta,
     ThinkingDelta,
@@ -614,7 +615,7 @@ async def test_permission_denial_is_returned_to_model_and_agent_loop_continues(
 
 
 @pytest.mark.asyncio
-async def test_permissions_command_does_not_call_provider_or_change_history(tmp_path: Path) -> None:
+async def test_permission_command_does_not_call_provider_or_change_history(tmp_path: Path) -> None:
     provider = FakeProvider([])
     registry = ToolRegistry()
     paths = PermissionPaths(
@@ -630,8 +631,8 @@ async def test_permissions_command_does_not_call_provider_or_change_history(tmp_
         permissions=permissions,
     )
 
-    status_events = [event async for event in session.stream_turn("/permissions strict")]
-    invalid_events = [event async for event in session.stream_turn("/permissions unsafe")]
+    status_events = [event async for event in session.stream_turn("/permission strict")]
+    invalid_events = [event async for event in session.stream_turn("/permission unsafe")]
 
     assert provider.requests == []
     assert session.messages == ()
@@ -905,6 +906,9 @@ async def test_restore_keeps_new_session_empty_until_selected_history_is_used(
     _ = [event async for event in session.stream_turn("再次任务")]
 
     assert not any(isinstance(event, AgentStopped) for event in events)
+    history_events = [event for event in events if isinstance(event, SessionHistoryEvent)]
+    assert len(history_events) == 1
+    assert [message.content for message in history_events[0].messages] == ["旧问题", "旧回答"]
     assert [message.content for message in provider.provider_requests[0].messages] == [
         "旧问题",
         "旧回答",
@@ -946,6 +950,9 @@ async def test_restore_compacts_once_before_replacing_history(tmp_path: Path) ->
     events = [event async for event in session.restore_session(journal.session_id)]
 
     assert not any(isinstance(event, AgentStopped) for event in events)
+    history_events = [event for event in events if isinstance(event, SessionHistoryEvent)]
+    assert len(history_events) == 1
+    assert [message.role for message in history_events[0].messages] == [Role.USER, Role.ASSISTANT]
     assert len(provider.provider_requests) == 1
     assert provider.provider_requests[0].tools == ()
     assert context.state.summary is not None

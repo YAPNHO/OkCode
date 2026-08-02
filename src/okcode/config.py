@@ -9,11 +9,18 @@ from urllib.parse import urlparse
 import yaml
 
 from okcode.errors import ConfigError
-from okcode.models import AppConfig, ProviderConfig, ProviderProtocol
+from okcode.models import AppConfig, ProviderConfig, ProviderProtocol, TeamFeatureConfig
 
-_ROOT_FIELDS = {"active", "providers"}
+_ROOT_FIELDS = {"active", "providers", "team"}
 _PROVIDER_FIELDS = {"name", "protocol", "model", "base_url", "api_key", "thinking", "prompt_cache"}
 _REQUIRED_PROVIDER_FIELDS = _PROVIDER_FIELDS - {"thinking", "prompt_cache"}
+_TEAM_FIELDS = {
+    "coordinator_enabled",
+    "teams_root",
+    "terminal_backend_priority",
+    "mailbox_lock_timeout_seconds",
+    "mailbox_stale_lock_seconds",
+}
 
 
 def default_config_path() -> Path:
@@ -55,7 +62,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ConfigError("providers 中的 name 不能重复")
     if active not in names:
         raise ConfigError(f"active 引用了不存在的供应商配置：{active}")
-    return AppConfig(active=active, providers=providers)
+    team = _parse_team(root.get("team", {}))
+    return AppConfig(active=active, providers=providers, team=team)
 
 
 def _parse_provider(raw: object, index: int) -> ProviderConfig:
@@ -97,6 +105,42 @@ def _parse_provider(raw: object, index: int) -> ProviderConfig:
     )
 
 
+def _parse_team(raw: object) -> TeamFeatureConfig:
+    item = _mapping(raw, "team")
+    _reject_unknown_fields(item, _TEAM_FIELDS, "team")
+    coordinator_enabled = item.get("coordinator_enabled", False)
+    if type(coordinator_enabled) is not bool:
+        raise ConfigError("team.coordinator_enabled 必须是布尔值")
+    teams_root_raw = item.get("teams_root")
+    teams_root = None
+    if teams_root_raw is not None:
+        teams_root = Path(_nonempty_string(teams_root_raw, "team.teams_root"))
+    priority_raw = item.get("terminal_backend_priority", ("windows_terminal", "tmux"))
+    if isinstance(priority_raw, list) and all(
+        isinstance(value, str) and value for value in priority_raw
+    ):
+        priority = tuple(priority_raw)
+    elif isinstance(priority_raw, tuple):
+        priority = priority_raw
+    else:
+        raise ConfigError("team.terminal_backend_priority 必须是字符串列表")
+    lock_timeout = _positive_float(
+        item.get("mailbox_lock_timeout_seconds", 5.0),
+        "team.mailbox_lock_timeout_seconds",
+    )
+    stale_lock = _positive_float(
+        item.get("mailbox_stale_lock_seconds", 30.0),
+        "team.mailbox_stale_lock_seconds",
+    )
+    return TeamFeatureConfig(
+        coordinator_enabled=coordinator_enabled,
+        teams_root=teams_root,
+        terminal_backend_priority=priority,
+        mailbox_lock_timeout_seconds=lock_timeout,
+        mailbox_stale_lock_seconds=stale_lock,
+    )
+
+
 def _mapping(value: object, location: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ConfigError(f"{location} 必须是对象")
@@ -115,3 +159,9 @@ def _nonempty_string(value: object, location: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{location} 必须是非空字符串")
     return value.strip()
+
+
+def _positive_float(value: object, location: str) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+        raise ConfigError(f"{location} 必须是正数")
+    return float(value)

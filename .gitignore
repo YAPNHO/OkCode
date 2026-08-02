@@ -7,9 +7,17 @@ __pycache__/
 .coverage
 coverage.xml
 dist/
+
+# OkCode 本地运行状态和用户隐私数据
+/sessions/
+.okcode/context/
+.okcode/memory/
+.okcode/team/
+.okcode/worktrees/
+.okcode/permissions.local.yaml
+
 .okcode/*
 !.okcode/
 !.okcode/permissions.yaml
-.okcode/memory/
 config.yaml
 *.egg-info/

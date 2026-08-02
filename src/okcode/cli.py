@@ -44,6 +44,13 @@ from okcode.skills import (
     SkillValidationError,
 )
 from okcode.skills.discovery import dedicated_tool_names
+from okcode.teams.backends import BackendSelector
+from okcode.teams.mailbox import MailboxStore
+from okcode.teams.merge import TeamMergeManager
+from okcode.teams.models import TeamBackendKind
+from okcode.teams.runtime import TeamRuntime
+from okcode.teams.store import TeamStore
+from okcode.teams.worker import TeamWorkerApp
 from okcode.terminal import TerminalUI
 from okcode.tools.defaults import build_default_registry
 from okcode.tools.executor import ToolExecutor
@@ -126,6 +133,21 @@ def main() -> int:
         worktree_manager = WorktreeManager(workspace.root)
         worktree_cleanup_worker = WorktreeCleanupWorker(worktree_manager)
         worktree_cleanup_worker.start()
+        team_store = TeamStore(
+            config.team.teams_root or (workspace.root / ".okcode" / "team"),
+            lock_timeout_seconds=config.team.mailbox_lock_timeout_seconds,
+            stale_lock_seconds=config.team.mailbox_stale_lock_seconds,
+        )
+        team_mailbox = MailboxStore(
+            lock_timeout_seconds=config.team.mailbox_lock_timeout_seconds,
+            stale_lock_seconds=config.team.mailbox_stale_lock_seconds,
+        )
+        team_runtime = TeamRuntime(
+            store=team_store,
+            mailbox=team_mailbox,
+            selector=BackendSelector(_team_backend_priority(config.team.terminal_backend_priority)),
+            merge_manager=TeamMergeManager(),
+        )
 
         def child_provider_factory(model_override: str | None = None):
             provider_config = config.active_provider
@@ -142,6 +164,31 @@ def main() -> int:
             parent_permissions=permissions,
             worktree_manager=worktree_manager,
         )
+
+        async def run_team_member(
+            team_name: str,
+            member_name: str,
+            message_id: str | None,
+        ) -> None:
+            snapshot = team_runtime.snapshot(team_name)
+            member = next(
+                (item for item in snapshot.members if item.name == member_name),
+                None,
+            )
+            if member is None:
+                return
+            await TeamWorkerApp(
+                team_runtime,
+                team_name,
+                member_name,
+                member.workdir,
+                provider_factory=child_provider_factory,
+                registry=registry,
+                parent_permissions=permissions,
+                cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
+            ).run_once_async(message_id)
+
+        team_runtime.configure_worker_factory(run_team_member)
         agent_task_manager = AgentTaskManager(agent_runner)
         agent_launcher = AgentLauncher(agent_roles, registry, agent_task_manager)
 
@@ -208,6 +255,8 @@ def main() -> int:
             skill_runtime=skill_runtime,
             hooks=hooks,
             agent_task_manager=agent_task_manager,
+            app_config=config,
+            team_runtime=team_runtime,
         )
         set_command_registry = getattr(ui, "set_command_registry", None)
         if callable(set_command_registry):
@@ -262,3 +311,19 @@ def main() -> int:
             except Exception:
                 pass
         runner.close()
+
+
+def _team_backend_priority(raw: tuple[str, ...]) -> tuple[TeamBackendKind, ...]:
+    priority: list[TeamBackendKind] = []
+    for item in raw:
+        if item in {"terminal_pane", "windows_terminal", "tmux"}:
+            priority.append(TeamBackendKind.TERMINAL_PANE)
+        elif item == "coroutine":
+            priority.append(TeamBackendKind.COROUTINE)
+    if not priority:
+        priority = [TeamBackendKind.TERMINAL_PANE, TeamBackendKind.COROUTINE]
+    deduped: list[TeamBackendKind] = []
+    for item in priority:
+        if item not in deduped:
+            deduped.append(item)
+    return tuple(deduped)
