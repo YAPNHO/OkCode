@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 
 from okcode.agents.launcher import AgentLauncher
 from okcode.agents.models import (
+    AgentIsolationMode,
     AgentLaunchKind,
     AgentTaskResult,
     AgentTaskSnapshot,
@@ -54,6 +55,8 @@ class AgentTool:
                     "background": {"type": "boolean"},
                     "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
                     "max_turns": {"type": "integer", "minimum": 1},
+                    "isolation": {"type": "string", "enum": ["shared", "worktree"]},
+                    "worktree_name": {"type": "string"},
                 },
                 "required": ["kind", "task"],
             },
@@ -109,6 +112,27 @@ def _parse_request(arguments: Mapping[str, JSONValue]) -> AgentToolRequest:
     max_turns = arguments.get("max_turns")
     if max_turns is not None and (not isinstance(max_turns, int) or isinstance(max_turns, bool)):
         raise ToolFailure(code=ToolErrorCode.INVALID_ARGUMENTS, content="max_turns 必须是正整数。")
+    isolation_raw = arguments.get("isolation")
+    isolation = None
+    if isolation_raw is not None:
+        if not isinstance(isolation_raw, str):
+            raise ToolFailure(
+                code=ToolErrorCode.INVALID_ARGUMENTS,
+                content="isolation 必须是字符串。",
+            )
+        try:
+            isolation = AgentIsolationMode(isolation_raw)
+        except ValueError as exc:
+            raise ToolFailure(
+                code=ToolErrorCode.INVALID_ARGUMENTS,
+                content="isolation 必须是 shared 或 worktree。",
+            ) from exc
+    worktree_name = arguments.get("worktree_name")
+    if worktree_name is not None and not isinstance(worktree_name, str):
+        raise ToolFailure(
+            code=ToolErrorCode.INVALID_ARGUMENTS,
+            content="worktree_name 必须是字符串。",
+        )
     return AgentToolRequest(
         kind=kind,
         task=task.strip(),
@@ -116,6 +140,8 @@ def _parse_request(arguments: Mapping[str, JSONValue]) -> AgentToolRequest:
         background=kind is AgentLaunchKind.FORK or bool(background),
         timeout_seconds=float(timeout) if timeout is not None else None,
         max_turns=max_turns,
+        isolation=isolation,
+        worktree_name=worktree_name.strip() if isinstance(worktree_name, str) else None,
     )
 
 
@@ -139,6 +165,8 @@ def _data(outcome: AgentTaskResult | AgentTaskSnapshot) -> dict[str, JSONValue]:
                 "model_requests": outcome.usage.model_request_count,
                 "tool_calls": outcome.usage.tool_call_count,
             },
+            "isolation": outcome.isolation.value,
+            "worktree": _worktree_data(outcome.worktree),
         }
     return {
         "task_id": outcome.task_id,
@@ -147,4 +175,19 @@ def _data(outcome: AgentTaskResult | AgentTaskSnapshot) -> dict[str, JSONValue]:
         "role": outcome.role_name,
         "summary": outcome.summary or "子 Agent 已进入后台执行。使用 /tasks 查看状态。",
         "error": outcome.error,
+        "isolation": outcome.isolation.value,
+        "worktree": _worktree_data(outcome.worktree),
+    }
+
+
+def _worktree_data(report) -> dict[str, JSONValue] | None:
+    if report is None:
+        return None
+    return {
+        "path": str(report.path),
+        "branch": report.branch,
+        "cleanup": report.cleanup_decision.value,
+        "message": report.cleanup_message,
+        "protection_reasons": [reason.value for reason in report.protection_reasons],
+        "changed_files": list(report.changed_files),
     }

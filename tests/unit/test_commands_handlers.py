@@ -24,6 +24,7 @@ from okcode.models import (
     CommandSession,
     CommandStatus,
     HookListEvent,
+    PermissionStatus,
     RuntimeModeChanged,
     TurnEvent,
 )
@@ -40,6 +41,7 @@ REVIEW_PROMPT = (
 class DummyConversation:
     def __init__(self) -> None:
         self.mode = RuntimeMode.DEFAULT
+        self.permission_mode = "default"
         self.user_messages: list[tuple[str, RuntimeMode | None, ToolScope | None]] = []
 
     @property
@@ -56,7 +58,23 @@ class DummyConversation:
         return CommandMemorySnapshot(("PROJECT.md",), ("USER.md",))
 
     def permission_string(self) -> str:
-        return self.mode.value
+        return self.permission_mode
+
+    def permission_status(self, message: str | None = None) -> TurnEvent:
+        return PermissionStatus(
+            self.permission_mode,
+            "default",
+            "C:/user/.okcode/permissions.yaml",
+            "D:/repo/.okcode/permissions.yaml",
+            "D:/repo/.okcode/permissions.local.yaml",
+            message,
+        )
+
+    def set_permission_mode(self, mode: str) -> TurnEvent:
+        if mode not in {"strict", "default", "allow"}:
+            return self.permission_status("权限模式只能是 strict、default 或 allow。")
+        self.permission_mode = mode
+        return self.permission_status("权限模式已更新。")
 
     def hook_list_event(self) -> TurnEvent:
         return HookListEvent((), "D:/repo/.okcode/hooks.yaml")
@@ -134,6 +152,7 @@ def test_default_registry_contains_builtin_commands_including_skill() -> None:
 
     assert [command.name for command in visible] == sorted(expected)
     assert {command.name: command.kind for command in visible} == expected
+    assert registry.resolve("permissions") is registry.resolve("permission")
 
 
 @pytest.mark.asyncio
@@ -162,11 +181,30 @@ async def test_local_status_memory_permission_and_session_commands() -> None:
     assert status.command_result.events[0].model_name == "model-x"  # type: ignore[union-attr]
     assert isinstance(memory.command_result.events[0], CommandMemory)  # type: ignore[union-attr]
     assert memory.command_result.events[0].project_memory_files == ("PROJECT.md",)  # type: ignore[union-attr]
-    assert permission.command_result.events == (CommandNotice("default"),)  # type: ignore[union-attr]
+    assert isinstance(permission.command_result.events[0], PermissionStatus)  # type: ignore[union-attr]
+    assert permission.command_result.events[0].current_mode == "default"  # type: ignore[union-attr]
     assert hooks.command_result.events == (HookListEvent((), "D:/repo/.okcode/hooks.yaml"),)  # type: ignore[union-attr]
     assert isinstance(session.command_result.events[0], CommandSession)  # type: ignore[union-attr]
     assert session.command_result.events[0].session_id == "session-1"  # type: ignore[union-attr]
     assert tasks.command_result.events == (AgentTaskListEvent(()),)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_permission_command_updates_mode_and_accepts_plural_alias() -> None:
+    conversation = DummyConversation()
+
+    allow = await _dispatch("/permission allow", conversation)
+    plural = await _dispatch("/permissions strict", conversation)
+    invalid = await _dispatch("/permission unsafe", conversation)
+    bad_usage = await _dispatch("/permission allow now", conversation)
+
+    assert conversation.permission_mode == "strict"
+    assert allow.command_result.events[0].current_mode == "allow"  # type: ignore[union-attr]
+    assert allow.command_result.events[0].message == "权限模式已更新。"  # type: ignore[union-attr]
+    assert plural.command_result.events[0].current_mode == "strict"  # type: ignore[union-attr]
+    assert invalid.command_result.events[0].current_mode == "strict"  # type: ignore[union-attr]
+    assert invalid.command_result.events[0].message == "权限模式只能是 strict、default 或 allow。"  # type: ignore[union-attr]
+    assert bad_usage.command_result.events[0].message == "用法：/permission [strict|default|allow]"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

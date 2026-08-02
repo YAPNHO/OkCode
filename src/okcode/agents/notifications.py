@@ -33,6 +33,18 @@ def format_task_notification(result: AgentTaskResult) -> str:
     ]
     if result.role_name:
         lines.append(f"- 角色：{result.role_name}")
+    if result.worktree is not None:
+        lines.extend(
+            [
+                f"- 隔离工作区：{result.worktree.path}",
+                f"- Worktree 分支：{result.worktree.branch}",
+                f"- Worktree 清理：{result.worktree.cleanup_decision.value}",
+                f"- Worktree 说明：{_limit(result.worktree.cleanup_message, _ERROR_LIMIT)}",
+            ]
+        )
+        if result.worktree.protection_reasons:
+            reasons = ", ".join(reason.value for reason in result.worktree.protection_reasons)
+            lines.append(f"- Worktree 保留原因：{reasons}")
     if result.summary:
         lines.append(f"- 摘要：{_limit(result.summary, _SUMMARY_LIMIT)}")
     if result.error:

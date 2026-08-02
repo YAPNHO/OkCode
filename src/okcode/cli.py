@@ -48,6 +48,8 @@ from okcode.terminal import TerminalUI
 from okcode.tools.defaults import build_default_registry
 from okcode.tools.executor import ToolExecutor
 from okcode.tools.workspace import Workspace
+from okcode.worktrees import WorktreeManager
+from okcode.worktrees.cleanup import WorktreeCleanupWorker
 
 
 def main() -> int:
@@ -65,6 +67,7 @@ def main() -> int:
     mcp_manager = None
     memory_worker = None
     agent_task_manager = None
+    worktree_cleanup_worker = None
     hooks = None
     try:
         workspace = Workspace(Path.cwd())
@@ -120,6 +123,9 @@ def main() -> int:
         )
         provider = create_provider(config.active_provider)
         context_manager = ContextManager(ArtifactStore(workspace.root))
+        worktree_manager = WorktreeManager(workspace.root)
+        worktree_cleanup_worker = WorktreeCleanupWorker(worktree_manager)
+        worktree_cleanup_worker.start()
 
         def child_provider_factory(model_override: str | None = None):
             provider_config = config.active_provider
@@ -134,6 +140,7 @@ def main() -> int:
             workspace_root=workspace.root,
             cache_policy=PromptCachePolicy(enabled=config.active_provider.prompt_cache),
             parent_permissions=permissions,
+            worktree_manager=worktree_manager,
         )
         agent_task_manager = AgentTaskManager(agent_runner)
         agent_launcher = AgentLauncher(agent_roles, registry, agent_task_manager)
@@ -232,6 +239,11 @@ def main() -> int:
         if agent_task_manager is not None:
             try:
                 agent_task_manager.close()
+            except Exception:
+                pass
+        if worktree_cleanup_worker is not None:
+            try:
+                worktree_cleanup_worker.close()
             except Exception:
                 pass
         if mcp_manager is not None:

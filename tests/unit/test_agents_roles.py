@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from okcode.agents.models import (
+    AgentIsolationMode,
     AgentModelKind,
     AgentPermissionKind,
     AgentRoleSourceKind,
@@ -52,6 +53,25 @@ def test_parse_agent_role_markdown_reads_frontmatter_and_body(tmp_path: Path) ->
     assert role.permission_policy.kind is AgentPermissionKind.STRICT
     assert role.permission_policy.resolved_mode is PermissionMode.STRICT
     assert role.system_prompt == "系统提示"
+    assert role.isolation is AgentIsolationMode.SHARED
+
+
+def test_parse_agent_role_markdown_reads_worktree_isolation(tmp_path: Path) -> None:
+    path = tmp_path / "worker.md"
+    path.write_text(
+        """---
+name: worker
+description: 隔离执行
+isolation: worktree
+---
+系统提示
+""",
+        encoding="utf-8",
+    )
+
+    role = parse_agent_role_markdown(path, AgentRoleSourceKind.PROJECT)
+
+    assert role.isolation is AgentIsolationMode.WORKTREE
 
 
 @pytest.mark.parametrize(
@@ -74,6 +94,10 @@ def test_parse_agent_role_markdown_reads_frontmatter_and_body(tmp_path: Path) ->
         (
             "---\nname: bad\ndescription: d\npermission: root\n---\n正文",
             "permission",
+        ),
+        (
+            "---\nname: bad\ndescription: d\nisolation: process\n---\n正文",
+            "isolation",
         ),
         (
             "---\nname: bad\ndescription: d\nmax_turns: 0\n---\n正文",
@@ -140,4 +164,9 @@ def test_builtin_roles_are_loadable() -> None:
     catalog = load_agent_roles(paths)
 
     assert "code-reviewer" in catalog.roles
+    assert "general-purpose" in catalog.roles
     assert "researcher" in catalog.roles
+    general = catalog.get("general-purpose")
+    assert "write_file" in general.tool_allowlist
+    assert "run_command" in general.tool_allowlist
+    assert general.permission_policy.kind is AgentPermissionKind.INHERIT

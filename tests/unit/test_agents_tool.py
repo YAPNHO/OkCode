@@ -5,6 +5,7 @@ import json
 import pytest
 
 from okcode.agents.models import (
+    AgentIsolationMode,
     AgentLaunchKind,
     AgentTaskResult,
     AgentTaskSnapshot,
@@ -49,6 +50,51 @@ async def test_agent_tool_definition_is_stable_and_defined_request_runs() -> Non
     assert data["status"] == "completed"
 
 
+async def test_agent_tool_parses_worktree_fields_for_defined_request() -> None:
+    launcher = Launcher(
+        AgentTaskResult(
+            "task-1", AgentLaunchKind.DEFINED, AgentTaskStatus.COMPLETED, summary="done"
+        )
+    )
+    tool = AgentTool(launcher, _parent)
+
+    await tool.execute(
+        {
+            "kind": "defined",
+            "task": "审查",
+            "role": "reviewer",
+            "isolation": "worktree",
+            "worktree_name": "agents/reviewer/custom",
+        }
+    )
+
+    request = launcher.requests[0][0]
+    assert request.isolation is AgentIsolationMode.WORKTREE
+    assert request.worktree_name == "agents/reviewer/custom"
+
+
+async def test_agent_tool_parses_worktree_fields_for_fork_request() -> None:
+    launcher = Launcher(
+        AgentTaskSnapshot("task-1", AgentLaunchKind.FORK, AgentTaskStatus.BACKGROUND)
+    )
+    tool = AgentTool(launcher, _parent)
+
+    await tool.execute(
+        {
+            "kind": "fork",
+            "task": "继续",
+            "isolation": "worktree",
+            "worktree_name": "agents/fork/custom",
+        }
+    )
+
+    request = launcher.requests[0][0]
+    assert request.kind is AgentLaunchKind.FORK
+    assert request.background is True
+    assert request.isolation is AgentIsolationMode.WORKTREE
+    assert request.worktree_name == "agents/fork/custom"
+
+
 async def test_agent_tool_formats_background_snapshot() -> None:
     launcher = Launcher(
         AgentTaskSnapshot("task-1", AgentLaunchKind.FORK, AgentTaskStatus.BACKGROUND)
@@ -67,3 +113,6 @@ async def test_agent_tool_rejects_invalid_arguments() -> None:
 
     with pytest.raises(ToolFailure, match="role"):
         await tool.execute({"kind": "defined", "task": "审查"})
+
+    with pytest.raises(ToolFailure, match="isolation"):
+        await tool.execute({"kind": "fork", "task": "继续", "isolation": "process"})

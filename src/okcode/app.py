@@ -52,7 +52,7 @@ class OkCodeApp:
             set_registry(self._command_registry)
 
     def run(self) -> int:
-        self._sync_runtime_mode()
+        self._sync_terminal_state()
         self._dispatch_session_start()
         self._ui.show_welcome(self._config, self._conversation.permission_mode)
         while True:
@@ -132,7 +132,7 @@ class OkCodeApp:
         elif result.ui_action is CommandUiAction.RESET_SESSION:
             self._ui.render_event(self._conversation.reset_session())
             rendered = True
-        self._sync_runtime_mode()
+        self._sync_terminal_state()
         if result.forward is not None:
             await self._consume_events(
                 self._conversation.stream_user_message(
@@ -161,10 +161,13 @@ class OkCodeApp:
         if finish:
             self._ui.finish_turn()
 
-    def _sync_runtime_mode(self) -> None:
+    def _sync_terminal_state(self) -> None:
         set_mode = getattr(self._ui, "set_runtime_mode", None)
         if callable(set_mode):
             set_mode(self._conversation.runtime_mode)
+        set_permission = getattr(self._ui, "set_permission_mode", None)
+        if callable(set_permission):
+            set_permission(self._conversation.permission_mode)
 
     def _dispatch_session_start(self) -> None:
         self._dispatch_hook(

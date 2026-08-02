@@ -340,3 +340,21 @@ def test_permission_status_and_denied_tool_are_rendered_without_full_data() -> N
     assert "工具：run_command" in text
     assert "未执行（project）" in text
     assert "不应显示" not in text
+
+
+def test_bottom_toolbar_reflects_permission_mode_updates() -> None:
+    ui, _ = _ui()
+
+    assert ui._bottom_toolbar() == "[模式:DEFAULT] [权限:DEFAULT]"
+
+    ui.render_event(
+        PermissionStatus(
+            "allow",
+            "default",
+            "C:/user/.okcode/permissions.yaml",
+            "project/.okcode/permissions.yaml",
+            "project/.okcode/permissions.local.yaml",
+        )
+    )
+
+    assert ui._bottom_toolbar() == "[模式:DEFAULT] [权限:ALLOW]"

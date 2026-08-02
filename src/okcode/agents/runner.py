@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
-from okcode.agents.filtering import FilteredToolRegistry
 from okcode.agents.manager import AgentCancelToken
 from okcode.agents.models import (
+    AgentIsolationMode,
     AgentLaunchKind,
     AgentLaunchRequest,
     AgentTaskResult,
     AgentTaskStatus,
     AgentUsage,
 )
-from okcode.context import ArtifactStore, ContextManager
+from okcode.agents.runtime import build_child_runtime
 from okcode.conversation import AgentConfig, ConversationSession
 from okcode.errors import ProviderError
 from okcode.models import (
@@ -26,18 +27,15 @@ from okcode.models import (
     ToolExecutionFinished,
 )
 from okcode.permissions.manager import PermissionManager
-from okcode.permissions.models import PermissionConfirmation, PermissionMode
-from okcode.prompt import (
-    PromptBuildContext,
-    PromptCachePolicy,
-    PromptOptionalSections,
-    SystemInstruction,
-    TurnKind,
-)
+from okcode.prompt import PromptCachePolicy
 from okcode.providers.base import LLMProvider
-from okcode.tools.executor import ToolExecutor
-from okcode.tools.models import ToolDefinition
 from okcode.tools.registry import ToolRegistry
+from okcode.worktrees.manager import WorktreeManager
+from okcode.worktrees.models import (
+    GitStatusSummary,
+    WorktreeCleanupStatus,
+    WorktreeExitReport,
+)
 
 ProviderFactory = Callable[[str | None], LLMProvider]
 
@@ -53,12 +51,14 @@ class AgentRunner:
         workspace_root: Path,
         cache_policy: PromptCachePolicy | None = None,
         parent_permissions: PermissionManager | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         self._provider_factory = provider_factory
         self._registry = registry
         self._workspace_root = workspace_root
         self._cache_policy = cache_policy or PromptCachePolicy()
         self._parent_permissions = parent_permissions
+        self._worktree_manager = worktree_manager
 
     async def run(
         self,
@@ -67,32 +67,58 @@ class AgentRunner:
     ) -> AgentTaskResult:
         """执行子 Agent 并汇总可返回给父对话的结果。"""
 
+        usage = AgentUsage()
+        lease = None
+        worktree_report: WorktreeExitReport | None = None
+        workspace_root = self._workspace_root
+        if request.isolation is AgentIsolationMode.WORKTREE:
+            if self._worktree_manager is None or request.worktree_request is None:
+                return _failed_result(
+                    request,
+                    "子 Agent 请求 worktree 隔离，但运行器未配置 WorktreeManager。",
+                    usage,
+                    None,
+                )
+            try:
+                lease = self._worktree_manager.prepare(request.worktree_request)
+                workspace_root = lease.path
+            except Exception as exc:
+                return _failed_result(request, str(exc), usage, None)
+
         provider = self._provider_factory(_model_override(request))
-        permissions = _clone_permissions(self._parent_permissions, request.permission_mode)
-        registry = FilteredToolRegistry(self._registry, request.visible_tool_names)
-        executor = ToolExecutor(registry, permissions=permissions)
+        runtime = build_child_runtime(
+            request,
+            self._registry,
+            workspace_root=workspace_root,
+            parent_permissions=self._parent_permissions,
+            worktree_note=lease.prompt_note if lease else None,
+        )
         session = ConversationSession(
             provider,
-            registry,
-            executor,
+            runtime.registry,
+            runtime.executor,
             config=AgentConfig(max_iterations=request.max_turns),
             cache_policy=self._cache_policy,
-            permissions=permissions,
-            context_manager=ContextManager(ArtifactStore(self._workspace_root)),
-            context_factory=_context_factory(request, self._workspace_root),
-            workspace_root=self._workspace_root,
+            permissions=runtime.permissions,
+            context_manager=runtime.context_manager,
+            context_factory=runtime.context_factory,
+            workspace_root=runtime.workspace_root,
             model_name=_model_override(request) or "",
             initial_messages=request.parent_messages
             if request.kind is AgentLaunchKind.FORK
             else (),
         )
 
-        usage = AgentUsage()
         stopped: AgentStopped | None = None
         try:
             async for event in session.stream_user_message(request.task):
                 if cancel_token.cancelled:
-                    return _cancelled_result(request, usage, session)
+                    worktree_report = _finalize_worktree(self._worktree_manager, lease)
+                    return _with_worktree_result(
+                        _cancelled_result(request, usage, session),
+                        request,
+                        worktree_report,
+                    )
                 if isinstance(event, TokenUsageReported):
                     usage = usage.add_token_usage(event.usage)
                 elif isinstance(event, ToolExecutionFinished):
@@ -100,11 +126,22 @@ class AgentRunner:
                 elif isinstance(event, AgentStopped):
                     stopped = event
         except ProviderError as exc:
-            return _failed_result(request, exc.safe_message, usage, session)
+            worktree_report = _finalize_worktree(self._worktree_manager, lease)
+            return _with_worktree_result(
+                _failed_result(request, exc.safe_message, usage, session),
+                request,
+                worktree_report,
+            )
         except Exception as exc:
-            return _failed_result(request, str(exc), usage, session)
+            worktree_report = _finalize_worktree(self._worktree_manager, lease)
+            return _with_worktree_result(
+                _failed_result(request, str(exc), usage, session),
+                request,
+                worktree_report,
+            )
 
         final_text = _last_assistant_text(session.messages)
+        worktree_report = _finalize_worktree(self._worktree_manager, lease)
         if stopped is not None:
             status = (
                 AgentTaskStatus.INCOMPLETE
@@ -122,6 +159,8 @@ class AgentRunner:
                 error=stopped.message,
                 rounds=usage.model_request_count,
                 usage=usage,
+                isolation=request.isolation,
+                worktree=worktree_report,
             )
         return AgentTaskResult(
             task_id=request.task_id,
@@ -132,60 +171,9 @@ class AgentRunner:
             summary=_summary(final_text),
             rounds=usage.model_request_count,
             usage=usage,
+            isolation=request.isolation,
+            worktree=worktree_report,
         )
-
-
-def _context_factory(
-    request: AgentLaunchRequest,
-    workspace_root: Path,
-) -> Callable[[TurnKind, int, Sequence[ToolDefinition]], PromptBuildContext]:
-    def build(
-        turn_kind: TurnKind,
-        iteration: int,
-        tools: Sequence[ToolDefinition],
-    ) -> PromptBuildContext:
-        instructions: list[SystemInstruction] = []
-        if request.role is not None:
-            instructions.append(
-                SystemInstruction("subagent_role", request.role.system_prompt, priority=70)
-            )
-        if request.kind is AgentLaunchKind.FORK:
-            instructions.append(
-                SystemInstruction(
-                    "subagent_fork",
-                    "你正在作为 Fork 式子 Agent 执行子任务。请基于已有父对话快照工作，"
-                    "不要假设可以向用户直接追问；需要用户决策时返回阻塞说明。",
-                    priority=75,
-                )
-            )
-        return PromptBuildContext(
-            workspace_root=str(workspace_root),
-            platform="testable",
-            current_date="2026-08-01",
-            available_tool_names=tuple(tool.name for tool in tools),
-            turn_kind=turn_kind,
-            iteration=iteration,
-            optional_sections=PromptOptionalSections(),
-            additional_system_instructions=tuple(instructions),
-        )
-
-    return build
-
-
-def _clone_permissions(
-    parent: PermissionManager | None,
-    mode: PermissionMode,
-) -> PermissionManager | None:
-    if parent is None:
-        return None
-    return PermissionManager(
-        getattr(parent, "_workspace"),
-        tuple(getattr(parent, "_rule_sets")),
-        parent.paths,
-        set(getattr(parent, "_known_tool_names")),
-        mode=mode,
-        confirmer=lambda _: PermissionConfirmation.DENY,
-    )
 
 
 def _model_override(request: AgentLaunchRequest) -> str | None:
@@ -212,18 +200,19 @@ def _failed_result(
     request: AgentLaunchRequest,
     message: str,
     usage: AgentUsage,
-    session: ConversationSession,
+    session: ConversationSession | None,
 ) -> AgentTaskResult:
     return AgentTaskResult(
         task_id=request.task_id,
         kind=request.kind,
         role_name=request.role.name if request.role else None,
         status=AgentTaskStatus.FAILED,
-        final_text=_last_assistant_text(session.messages),
+        final_text=_last_assistant_text(session.messages) if session else "",
         summary="子 Agent 任务执行失败。",
         error=message,
         rounds=usage.model_request_count,
         usage=usage,
+        isolation=request.isolation,
     )
 
 
@@ -242,4 +231,34 @@ def _cancelled_result(
         error="用户取消了子 Agent 任务。",
         rounds=usage.model_request_count,
         usage=usage,
+        isolation=request.isolation,
     )
+
+
+def _finalize_worktree(
+    manager: WorktreeManager | None,
+    lease,
+) -> WorktreeExitReport | None:
+    if manager is None or lease is None:
+        return None
+    try:
+        return manager.finalize(lease)
+    except Exception as exc:
+        return WorktreeExitReport(
+            path=lease.path,
+            branch=lease.branch,
+            name=lease.metadata.identity.name,
+            status_summary=GitStatusSummary(failed=True, error=str(exc)),
+            changed_files=(),
+            protection_reasons=(),
+            cleanup_decision=WorktreeCleanupStatus.FAILED,
+            cleanup_message=f"worktree 退出清理失败：{exc}",
+        )
+
+
+def _with_worktree_result(
+    result: AgentTaskResult,
+    request: AgentLaunchRequest,
+    worktree_report: WorktreeExitReport | None,
+) -> AgentTaskResult:
+    return replace(result, isolation=request.isolation, worktree=worktree_report)

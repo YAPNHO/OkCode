@@ -215,6 +215,7 @@ class AgentTaskManager:
                 error="用户取消了子 Agent 任务。",
                 started_at=record.started_at,
                 ended_at=_now(),
+                isolation=record.request.isolation,
             )
             self._finish_record(record, result)
             return self._snapshot(record)
@@ -349,6 +350,8 @@ class AgentTaskManager:
                     usage=result.usage,
                     started_at=result.started_at or record.started_at,
                     ended_at=_now(),
+                    isolation=result.isolation,
+                    worktree=result.worktree,
                 )
             record.result = result
             record.status = result.status
@@ -393,6 +396,8 @@ class AgentTaskManager:
             usage=usage or result_usage(record),
             summary=result.summary if result is not None else "",
             error=record.error,
+            isolation=result.isolation if result is not None else record.request.isolation,
+            worktree=result.worktree if result is not None else None,
         )
 
     def _require_record(self, task_id: str) -> _TaskRecord:
@@ -424,6 +429,7 @@ def _result_with_status(
         error=error,
         started_at=started_at,
         ended_at=_now(),
+        isolation=request.isolation,
     )
 
 
@@ -445,6 +451,9 @@ def _replace_task_id(request: AgentLaunchRequest, task_id: str) -> AgentLaunchRe
         trigger=request.trigger,
         runtime_mode=request.runtime_mode,
         permission_mode=request.permission_mode,
+        isolation=request.isolation,
+        worktree_request=request.worktree_request,
+        main_workspace_root=request.main_workspace_root,
     )
 
 

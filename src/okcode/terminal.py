@@ -57,6 +57,7 @@ class TerminalUI:
         self._turn_open = False
         self._command_registry: CommandRegistry | None = None
         self._runtime_mode = RuntimeMode.DEFAULT
+        self._permission_mode = "default"
 
     def prompt(self) -> str | None:
         """读取一轮输入；EOF 表示退出。"""
@@ -74,6 +75,7 @@ class TerminalUI:
                 return None
 
     def show_welcome(self, config: ProviderConfig, permission_mode: str = "default") -> None:
+        self._permission_mode = permission_mode
         self._console.print(
             f"OkCode | {config.name} | {config.protocol} | {config.model} | 权限：{permission_mode}"
         )
@@ -217,6 +219,9 @@ class TerminalUI:
 
     def set_runtime_mode(self, mode: RuntimeMode) -> None:
         self._runtime_mode = mode
+
+    def set_permission_mode(self, mode: str) -> None:
+        self._permission_mode = mode
 
     def clear_screen(self) -> None:
         self._finish_line()
@@ -366,6 +371,7 @@ class TerminalUI:
 
     def _render_permission_status(self, event: PermissionStatus) -> None:
         self._finish_line()
+        self._permission_mode = event.current_mode
         self._console.print(
             f"权限：当前 {event.current_mode}，默认 {event.default_mode}。", style="dim"
         )
@@ -558,4 +564,4 @@ class TerminalUI:
         return PromptSession(**kwargs)
 
     def _bottom_toolbar(self) -> str:
-        return self._runtime_mode.marker
+        return f"[模式:{self._runtime_mode.value.upper()}] [权限:{self._permission_mode.upper()}]"

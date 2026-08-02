@@ -183,11 +183,26 @@ class ConversationSession:
             runtime_mode=self._runtime_mode,
             permission_mode=self._permissions.mode if self._permissions else PermissionMode.DEFAULT,
             visible_tool_names=tuple(tool.name for tool in tools),
+            workspace_root=self._workspace_root,
             depth=0,
         )
 
     def permission_string(self) -> str:
-        return self._runtime_mode.value
+        return self.permission_mode
+
+    def permission_status(self, message: str | None = None) -> TurnEvent:
+        if self._permissions is None:
+            return AgentStopped(AgentStopReason.NO_SAVED_PLAN, "当前会话未启用权限系统。")
+        return self._permission_status(message)
+
+    def set_permission_mode(self, mode: str) -> TurnEvent:
+        if self._permissions is None:
+            return AgentStopped(AgentStopReason.NO_SAVED_PLAN, "当前会话未启用权限系统。")
+        try:
+            self._permissions.set_mode(mode)
+        except ValueError:
+            return self._permission_status("权限模式只能是 strict、default 或 allow。")
+        return self._permission_status("权限模式已更新。")
 
     def hook_list_event(self) -> HookListEvent:
         if self._hooks is None:
@@ -361,7 +376,7 @@ class ConversationSession:
             async for event in self.stream_manual_compaction():
                 yield event
             return
-        if command == "/permissions":
+        if command in {"/permission", "/permissions"}:
             async for event in self._handle_permissions_command(stripped):
                 yield event
             return
@@ -886,22 +901,14 @@ class ConversationSession:
         return tool is not None and tool.definition.safety is ToolSafety.READ_ONLY
 
     async def _handle_permissions_command(self, text: str) -> AsyncIterator[TurnEvent]:
-        if self._permissions is None:
-            yield AgentStopped(AgentStopReason.NO_SAVED_PLAN, "当前会话未启用权限系统。")
-            return
         parts = text.split()
         if len(parts) == 1:
-            yield self._permission_status()
+            yield self.permission_status()
             return
         if len(parts) == 2:
-            try:
-                self._permissions.set_mode(parts[1])
-            except ValueError:
-                yield self._permission_status("权限模式只能是 strict、default 或 allow。")
-                return
-            yield self._permission_status("权限模式已更新。")
+            yield self.set_permission_mode(parts[1])
             return
-        yield self._permission_status("用法：/permissions [strict|default|allow]")
+        yield self.permission_status("用法：/permissions [strict|default|allow]")
 
     def _permission_status(self, message: str | None = None) -> PermissionStatus:
         assert self._permissions is not None

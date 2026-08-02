@@ -101,7 +101,14 @@ def memory_command(context: CommandContext, command: ParsedCommand) -> CommandRe
 
 
 def permission_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
-    return CommandResult(events=(CommandNotice(context.conversation.permission_string()),))
+    args = command.args.strip().split()
+    if not args:
+        return CommandResult(events=(context.conversation.permission_status(),))
+    if len(args) == 1:
+        return CommandResult(events=(context.conversation.set_permission_mode(args[0]),))
+    return CommandResult(
+        events=(context.conversation.permission_status("用法：/permission [strict|default|allow]"),)
+    )
 
 
 def hooks_command(context: CommandContext, command: ParsedCommand) -> CommandResult:

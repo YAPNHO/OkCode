@@ -10,6 +10,7 @@ from pathlib import Path
 from okcode.commands.models import RuntimeMode
 from okcode.models import ChatMessage, TokenUsage
 from okcode.permissions.models import PermissionMode
+from okcode.worktrees.models import WorktreeExitReport, WorktreePrepareRequest
 
 
 class AgentLaunchKind(StrEnum):
@@ -38,6 +39,13 @@ class AgentTaskStatus(StrEnum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
     INCOMPLETE = "incomplete"
+
+
+class AgentIsolationMode(StrEnum):
+    """子 Agent 文件系统隔离模式。"""
+
+    SHARED = "shared"
+    WORKTREE = "worktree"
 
 
 class AgentModelKind(StrEnum):
@@ -106,6 +114,7 @@ class AgentRole:
     max_turns: int = 6
     permission_policy: AgentPermissionPolicy = field(default_factory=AgentPermissionPolicy)
     system_prompt: str = ""
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +176,7 @@ class ParentAgentContext:
     runtime_mode: RuntimeMode
     permission_mode: PermissionMode
     visible_tool_names: tuple[str, ...]
+    workspace_root: Path = field(default_factory=Path.cwd)
     depth: int = 0
 
 
@@ -180,6 +190,8 @@ class AgentToolRequest:
     background: bool = False
     timeout_seconds: float | None = None
     max_turns: int | None = None
+    isolation: AgentIsolationMode | None = None
+    worktree_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +214,9 @@ class AgentLaunchRequest:
     trigger: str = "tool"
     runtime_mode: RuntimeMode = RuntimeMode.DEFAULT
     permission_mode: PermissionMode = PermissionMode.DEFAULT
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    worktree_request: WorktreePrepareRequest | None = None
+    main_workspace_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +284,8 @@ class AgentTaskResult:
     usage: AgentUsage = field(default_factory=AgentUsage)
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    worktree: WorktreeExitReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +305,8 @@ class AgentTaskSnapshot:
     usage: AgentUsage = field(default_factory=AgentUsage)
     summary: str = ""
     error: str | None = None
+    isolation: AgentIsolationMode = AgentIsolationMode.SHARED
+    worktree: WorktreeExitReport | None = None
 
 
 @dataclass(frozen=True, slots=True)

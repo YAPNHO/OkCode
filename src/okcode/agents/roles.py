@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from okcode.agents.models import (
+    AgentIsolationMode,
     AgentModelKind,
     AgentModelPolicy,
     AgentPermissionKind,
@@ -21,7 +22,15 @@ from okcode.agents.models import (
 from okcode.errors import ConfigError
 from okcode.permissions.models import PermissionMode
 
-_ROOT_FIELDS = {"name", "description", "tools", "model", "max_turns", "permission"}
+_ROOT_FIELDS = {
+    "name",
+    "description",
+    "tools",
+    "model",
+    "max_turns",
+    "permission",
+    "isolation",
+}
 _TOOLS_FIELDS = {"allow", "deny"}
 
 
@@ -98,6 +107,7 @@ def parse_agent_role_markdown(path: Path, source: AgentRoleSourceKind) -> AgentR
         max_turns=max_turns,
         permission_policy=_permission_policy(data.get("permission", "inherit"), path, role_name),
         system_prompt=system_prompt,
+        isolation=_isolation(data.get("isolation", "shared"), path, role_name),
     )
 
 
@@ -207,6 +217,18 @@ def _permission_policy(value: object, path: Path, role_name: str) -> AgentPermis
         AgentPermissionKind.INHERIT: None,
     }[kind]
     return AgentPermissionPolicy(kind, resolved)
+
+
+def _isolation(value: object, path: Path, role_name: str) -> AgentIsolationMode:
+    if not isinstance(value, str):
+        raise ConfigError(f"子 Agent 角色 {role_name!r} 字段 isolation 必须是字符串：{path}")
+    try:
+        return AgentIsolationMode(value.strip())
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in AgentIsolationMode)
+        raise ConfigError(
+            f"子 Agent 角色 {role_name!r} 字段 isolation 只能是：{allowed}：{path}"
+        ) from exc
 
 
 def _positive_int(value: object, field: str, path: Path, role_name: str) -> int:

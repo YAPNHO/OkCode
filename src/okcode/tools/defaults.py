@@ -11,10 +11,30 @@ def build_default_registry(workspace: Workspace) -> ToolRegistry:
     """创建固定的六项核心工具注册表。"""
 
     registry = ToolRegistry()
+    register_workspace_tools(registry, workspace)
+    return registry
+
+
+def register_workspace_tools(registry: ToolRegistry, workspace: Workspace) -> None:
+    """向注册表加入绑定到指定工作区的本地文件/命令工具。"""
+
     registry.register(ReadFileTool(workspace))
     registry.register(WriteFileTool(workspace))
     registry.register(EditFileTool(workspace))
     registry.register(RunCommandTool(workspace))
     registry.register(FindFilesTool(workspace))
     registry.register(SearchCodeTool(workspace))
+
+
+def build_child_registry(parent: ToolRegistry, workspace: Workspace) -> ToolRegistry:
+    """为子 Agent 重建本地工具，并复用 MCP/Skill 等非本地工具。"""
+
+    registry = build_default_registry(workspace)
+    local_tool_names = {definition.name for definition in registry.definitions()}
+    for definition in parent.definitions():
+        if definition.name in local_tool_names:
+            continue
+        tool = parent.get(definition.name)
+        if tool is not None:
+            registry.register(tool)
     return registry
