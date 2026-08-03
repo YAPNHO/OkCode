@@ -14,10 +14,12 @@ from okcode.permissions.models import (
     PermissionDecision,
     PermissionMode,
     PermissionRequest,
+    PermissionRequestOrigin,
     PermissionRule,
     RuleAction,
     RuleSet,
     RuleSource,
+    SessionPermissionGrant,
 )
 from okcode.permissions.rules import PermissionPaths, append_local_allow_rule
 from okcode.tools.models import (
@@ -55,7 +57,7 @@ class PermissionManager:
         self._known_tool_names = known_tool_names
         self._mode = mode
         self._confirmer = confirmer or _deny_confirmation
-        self._session_rules: list[PermissionRule] = []
+        self._session_grants: set[SessionPermissionGrant] = set()
 
     @property
     def mode(self) -> PermissionMode:
@@ -69,9 +71,9 @@ class PermissionManager:
         self._mode = PermissionMode(mode)
 
     def allow_for_session(self, request: PermissionRequest) -> None:
-        """为当前进程加入一条精确的会话允许规则。"""
+        """为当前进程加入一条当前授权域内的工具级允许规则。"""
 
-        self._session_rules.append(_allow_rule_for(request))
+        self._session_grants.add(SessionPermissionGrant.from_request(request))
 
     def authorize(
         self,
@@ -81,7 +83,12 @@ class PermissionManager:
     ) -> PermissionDecision:
         """返回终局权限结论；拒绝路径不会执行工具业务代码。"""
 
-        request_or_decision = self._authorize_without_confirmation(call, tool, arguments)
+        request_or_decision = self._authorize_without_confirmation(
+            call,
+            tool,
+            arguments,
+            origin=PermissionRequestOrigin.TOOL,
+        )
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
         return self._confirm(request_or_decision)
@@ -94,7 +101,12 @@ class PermissionManager:
     ) -> PermissionDecision:
         """异步等待默认模式的用户确认，避免阻塞正在运行的事件循环。"""
 
-        request_or_decision = self._authorize_without_confirmation(call, tool, arguments)
+        request_or_decision = self._authorize_without_confirmation(
+            call,
+            tool,
+            arguments,
+            origin=PermissionRequestOrigin.TOOL,
+        )
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
         return await self._confirm_async(request_or_decision)
@@ -116,7 +128,12 @@ class PermissionManager:
             safety=ToolSafety.SIDE_EFFECT,
             permission_target=PermissionTarget(PermissionTargetKind.COMMAND, "command"),
         )
-        request_or_decision = self._authorize_without_confirmation(call, tool, {"command": command})
+        request_or_decision = self._authorize_without_confirmation(
+            call,
+            tool,
+            {"command": command},
+            origin=PermissionRequestOrigin.HOOK,
+        )
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
         if background:
@@ -132,8 +149,10 @@ class PermissionManager:
         call: ToolCall,
         tool: ToolDefinition,
         arguments: Mapping[str, JSONValue],
+        *,
+        origin: PermissionRequestOrigin,
     ) -> PermissionRequest | PermissionDecision:
-        request_or_decision = self._build_request(call, tool, arguments)
+        request_or_decision = self._build_request(call, tool, arguments, origin=origin)
         if isinstance(request_or_decision, PermissionDecision):
             return request_or_decision
         request = request_or_decision
@@ -149,6 +168,9 @@ class PermissionManager:
                 return PermissionDecision(True, source, "调用已被权限规则允许。")
             return PermissionDecision(False, source, "调用被权限规则拒绝。")
 
+        if SessionPermissionGrant.from_request(request) in self._session_grants:
+            return PermissionDecision(True, RuleSource.SESSION, "调用已被本会话授权允许。")
+
         if self._mode is PermissionMode.STRICT:
             return PermissionDecision(False, RuleSource.MODE, "严格模式拒绝未匹配规则的调用。")
         if self._mode is PermissionMode.ALLOW:
@@ -161,10 +183,20 @@ class PermissionManager:
         call: ToolCall,
         tool: ToolDefinition,
         arguments: Mapping[str, JSONValue],
+        *,
+        origin: PermissionRequestOrigin,
     ) -> PermissionRequest | PermissionDecision:
         target_definition = tool.permission_target
         if target_definition.kind is PermissionTargetKind.NONE:
-            return PermissionRequest(call, tool, arguments, PermissionTargetKind.NONE, None, None)
+            return PermissionRequest(
+                call,
+                tool,
+                arguments,
+                PermissionTargetKind.NONE,
+                None,
+                None,
+                origin,
+            )
         argument_name = target_definition.argument_name
         if argument_name is None:
             return PermissionDecision(False, RuleSource.SANDBOX, "工具缺少权限目标配置。")
@@ -176,7 +208,13 @@ class PermissionManager:
             return PermissionDecision(False, RuleSource.SANDBOX, "工具权限目标无效。")
         if target_definition.kind is PermissionTargetKind.COMMAND:
             return PermissionRequest(
-                call, tool, arguments, PermissionTargetKind.COMMAND, raw_value, raw_value
+                call,
+                tool,
+                arguments,
+                PermissionTargetKind.COMMAND,
+                raw_value,
+                raw_value,
+                origin,
             )
         try:
             _, relative = self._workspace.resolve_path_with_relative(raw_value, must_exist=False)
@@ -190,13 +228,16 @@ class PermissionManager:
                 )
             return PermissionDecision(False, RuleSource.SANDBOX, "无法安全解析工具路径。")
         return PermissionRequest(
-            call, tool, arguments, PermissionTargetKind.PATH, relative, relative
+            call,
+            tool,
+            arguments,
+            PermissionTargetKind.PATH,
+            relative,
+            relative,
+            origin,
         )
 
     def _resolve_rule(self, request: PermissionRequest) -> tuple[RuleAction, RuleSource] | None:
-        for rule in self._session_rules:
-            if rule.matches(request):
-                return rule.action, RuleSource.SESSION
         for rule_set in self._rule_sets:
             for rule in rule_set.rules:
                 if rule.matches(request):

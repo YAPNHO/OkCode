@@ -39,6 +39,13 @@ class RuleSource(StrEnum):
     USER_CONFIRMATION = "user_confirmation"
 
 
+class PermissionRequestOrigin(StrEnum):
+    """权限请求所属的运行域，用于隔离普通工具与内部自动化。"""
+
+    TOOL = "tool"
+    HOOK = "hook"
+
+
 class PermissionConfirmation(StrEnum):
     """默认模式下用户可作出的确认选择。"""
 
@@ -110,6 +117,20 @@ class PermissionRequest:
     target_kind: PermissionTargetKind
     target: str | None
     display_target: str | None
+    origin: PermissionRequestOrigin = PermissionRequestOrigin.TOOL
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPermissionGrant:
+    """只在当前权限管理器内存中生效的工具级会话授权。"""
+
+    origin: PermissionRequestOrigin
+    tool_name: str
+    target_kind: PermissionTargetKind
+
+    @classmethod
+    def from_request(cls, request: PermissionRequest) -> SessionPermissionGrant:
+        return cls(request.origin, request.call.name, request.target_kind)
 
 
 @dataclass(frozen=True, slots=True)

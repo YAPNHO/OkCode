@@ -207,6 +207,36 @@ async def test_executor_waits_for_async_permission_confirmation(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_executor_reuses_session_grant_for_different_commands(tmp_path) -> None:
+    tool = CommandTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    confirmation_count = 0
+
+    async def confirm(_: object) -> PermissionConfirmation:
+        nonlocal confirmation_count
+        confirmation_count += 1
+        return PermissionConfirmation.SESSION
+
+    permissions = PermissionManager(
+        Workspace(tmp_path),
+        (),
+        PermissionPaths.for_workspace(tmp_path),
+        {"run_command"},
+        confirmer=confirm,
+    )
+    executor = ToolExecutor(registry, permissions=permissions)
+
+    first = await executor.execute(ToolCall("first", "run_command", '{"command":"git status"}'))
+    second = await executor.execute(ToolCall("second", "run_command", '{"command":"git diff"}'))
+
+    assert first.success is True
+    assert second.success is True
+    assert tool.calls == 2
+    assert confirmation_count == 1
+
+
+@pytest.mark.asyncio
 async def test_hook_before_rejection_happens_before_tool_execution() -> None:
     tool = CommandTool()
     registry = ToolRegistry()

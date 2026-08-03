@@ -407,7 +407,9 @@ async def test_permission_confirmation_maps_choices_and_safe_failures_to_deny() 
 
     ui, output = _ui(["d"])
     _ = await ui.confirm_permission(_permission_request())
-    assert "可能修改项目或影响系统" in _plain_text(output)
+    text = _plain_text(output)
+    assert "可能修改项目或影响系统" in text
+    assert "s=本会话内允许此工具" in text.replace("\n", "")
 
 
 def test_permission_status_and_denied_tool_are_rendered_without_full_data() -> None:

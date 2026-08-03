@@ -858,9 +858,8 @@ class ConversationSession:
         return replace(self._team_context, coordinator=self._coordinator_enabled())
 
     def _coordinator_enabled(self) -> bool:
-        return (
-            self._app_config is not None
-            and self._coordinator_policy.is_enabled(self._app_config, os.environ)
+        return self._app_config is not None and self._coordinator_policy.is_enabled(
+            self._app_config, os.environ
         )
 
     def _effective_registry(self) -> ToolRegistry:
@@ -911,9 +910,7 @@ class ConversationSession:
             for member in getattr(snapshot, "members", ())
         )
         blocked = sum(
-            1
-            for task in getattr(snapshot, "tasks", ())
-            if task.status is TeamTaskStatus.BLOCKED
+            1 for task in getattr(snapshot, "tasks", ()) if task.status is TeamTaskStatus.BLOCKED
         )
         return TeamStatusEvent(
             metadata.name,

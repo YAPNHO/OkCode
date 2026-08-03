@@ -89,7 +89,9 @@ def test_store_mutates_tasks_atomically_and_preserves_dependencies(tmp_path: Pat
     store.mutate_tasks(
         "core",
         lambda tasks: [
-            task if task.task_id != "task-1" else task.__class__(
+            task
+            if task.task_id != "task-1"
+            else task.__class__(
                 task.task_id,
                 task.title,
                 task.body,

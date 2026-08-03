@@ -168,9 +168,9 @@ async def test_fork_worktree_can_write_and_commit_without_touching_main_repo(
                                 "run_command",
                                 (
                                     '{"command":"git add witness.txt && '
-                                    'git -c user.email=test@example.com '
-                                    '-c user.name=Test commit -m '
-                                    '\\\"isolated witness\\\""}'
+                                    "git -c user.email=test@example.com "
+                                    "-c user.name=Test commit -m "
+                                    '\\"isolated witness\\""}'
                                 ),
                             ),
                         ),
@@ -227,6 +227,5 @@ async def test_fork_worktree_can_write_and_commit_without_touching_main_repo(
         "modified by isolated worker\n"
     )
     assert (
-        _git_output(result.worktree.path, "log", "-1", "--format=%s").strip()
-        == "isolated witness"
+        _git_output(result.worktree.path, "log", "-1", "--format=%s").strip() == "isolated witness"
     )

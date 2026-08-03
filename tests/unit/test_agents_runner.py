@@ -148,7 +148,9 @@ async def test_agent_runner_respects_empty_visible_tool_set(tmp_path: Path) -> N
     assert provider.requests[1][-1].tool_result.error_code is ToolErrorCode.UNKNOWN_TOOL
 
 
-async def test_child_permission_session_rules_do_not_mutate_parent(tmp_path: Path) -> None:
+async def test_child_permissions_do_not_inherit_or_mutate_parent_session_grants(
+    tmp_path: Path,
+) -> None:
     workspace = Workspace(tmp_path)
     parent = PermissionManager(
         workspace,
@@ -158,7 +160,18 @@ async def test_child_permission_session_rules_do_not_mutate_parent(tmp_path: Pat
         mode=PermissionMode.DEFAULT,
         confirmer=lambda _: PermissionConfirmation.SESSION,
     )
-    provider = FakeProvider([_assistant("完成")])
+    parent_grant = parent.authorize(
+        ToolCall("parent", "read_file", "{}"),
+        EchoTool().definition,
+        {},
+    )
+    tool_call = ToolCall("child", "read_file", "{}")
+    provider = FakeProvider(
+        [
+            [StreamCompleted(ChatMessage(Role.ASSISTANT, tool_call=tool_call), TokenUsage())],
+            [_assistant("完成")],
+        ]
+    )
     runner = AgentRunner(
         lambda _: provider, _registry(), workspace_root=tmp_path, parent_permissions=parent
     )
@@ -169,9 +182,14 @@ async def test_child_permission_session_rules_do_not_mutate_parent(tmp_path: Pat
             AgentLaunchKind.DEFINED,
             "读",
             "parent",
+            visible_tool_names=("read_file",),
             permission_mode=PermissionMode.DEFAULT,
         ),
         AgentCancelToken(),
     )
 
-    assert getattr(parent, "_session_rules") == []
+    assert parent_grant.allowed is True
+    assert len(getattr(parent, "_session_grants")) == 1
+    child_result = provider.requests[1][-1].tool_result
+    assert child_result is not None
+    assert child_result.error_code is ToolErrorCode.PERMISSION_DENIED

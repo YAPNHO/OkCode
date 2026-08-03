@@ -213,7 +213,10 @@ class TerminalUI:
         target = request.display_target or "无主操作目标"
         self._console.print(f"权限确认：{request.call.name} -> {target}", style="yellow")
         self._console.print("此操作可能修改项目或影响系统，请确认是否允许。", style="yellow")
-        self._console.print("选择：d=拒绝，o=仅本次，s=本会话，p=永久允许，/exit=退出", style="dim")
+        self._console.print(
+            "选择：d=拒绝，o=仅本次，s=本会话内允许此工具，p=永久允许，/exit=退出",
+            style="dim",
+        )
         try:
             session = self._session
             if session is None:

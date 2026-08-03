@@ -332,11 +332,7 @@ class TeamRuntime:
         except TimeoutError:
             return report
         member = next(
-            (
-                item
-                for item in self._store.load(team_name).members
-                if item.name == member_name
-            ),
+            (item for item in self._store.load(team_name).members if item.name == member_name),
             None,
         )
         return replace(report, status=member.status.value if member is not None else report.status)

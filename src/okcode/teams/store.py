@@ -82,9 +82,7 @@ class TeamStore:
             coerce_dataclass(TeamTask, item)
             for item in _ensure_list(read_json(paths.tasks_json, []))
         )
-        unread_counts = {
-            member.name: _count_unread(member.mailbox_path) for member in members
-        }
+        unread_counts = {member.name: _count_unread(member.mailbox_path) for member in members}
         recoverable = {
             member.name: member.context_ref is not None and member.workdir.exists()
             for member in members
@@ -96,6 +94,7 @@ class TeamStore:
         paths = self.paths(team_name)
         mailbox_path = paths.mailbox_path(safe_member)
         stored_member = replace(member, name=safe_member, mailbox_path=mailbox_path)
+
         def mutate(members: list[TeamMember]) -> list[TeamMember]:
             by_name = {item.name: item for item in members}
             by_name[safe_member] = stored_member

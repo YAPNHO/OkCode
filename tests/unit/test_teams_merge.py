@@ -45,9 +45,7 @@ def test_merge_manager_merges_clean_member_branches(tmp_path: Path) -> None:
     _commit(repo, "worker b")
     _git(repo, "checkout", "master")
 
-    report = TeamMergeManager().merge(
-        TeamMergeRequest("core", ("worker-a", "worker-b"), repo)
-    )
+    report = TeamMergeManager().merge(TeamMergeRequest("core", ("worker-a", "worker-b"), repo))
 
     assert report.status is TeamMergeStatus.CLEAN
     assert report.merged_members == ("worker-a", "worker-b")
@@ -69,9 +67,7 @@ def test_merge_manager_rolls_back_unresolvable_conflict(tmp_path: Path) -> None:
     _commit(repo, "worker b")
     _git(repo, "checkout", "master")
 
-    report = TeamMergeManager().merge(
-        TeamMergeRequest("core", ("worker-a", "worker-b"), repo)
-    )
+    report = TeamMergeManager().merge(TeamMergeRequest("core", ("worker-a", "worker-b"), repo))
 
     assert report.status is TeamMergeStatus.ROLLED_BACK
     assert report.rollback_performed is True

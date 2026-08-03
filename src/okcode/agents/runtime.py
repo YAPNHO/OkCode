@@ -93,9 +93,7 @@ def build_child_context_factory(
                 )
             )
         if worktree_note:
-            instructions.append(
-                SystemInstruction("subagent_worktree", worktree_note, priority=76)
-            )
+            instructions.append(SystemInstruction("subagent_worktree", worktree_note, priority=76))
         return PromptBuildContext(
             workspace_root=str(workspace_root),
             platform="testable",

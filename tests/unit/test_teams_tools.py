@@ -24,8 +24,7 @@ def _tool_names(runtime: TeamRuntime | None, context: TeamToolContext | None, tm
 
 def test_default_registry_does_not_include_team_tools(tmp_path: Path) -> None:
     names = {
-        definition.name
-        for definition in build_default_registry(Workspace(tmp_path)).definitions()
+        definition.name for definition in build_default_registry(Workspace(tmp_path)).definitions()
     }
 
     assert "team_task" not in names
@@ -66,8 +65,7 @@ async def test_team_task_tool_calls_runtime(tmp_path: Path) -> None:
                 "id": "call-1",
                 "name": "team_task",
                 "arguments_json": (
-                    '{"action":"create","title":"build","body":"do it",'
-                    '"dependencies":["task-0"]}'
+                    '{"action":"create","title":"build","body":"do it","dependencies":["task-0"]}'
                 ),
             },
         )()
