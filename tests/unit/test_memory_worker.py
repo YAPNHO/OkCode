@@ -22,7 +22,7 @@ def _store(tmp_path: Path) -> MemoryStore:
     )
 
 
-def _response(note_ref: str) -> str:
+def _response(name: str) -> str:
     return json.dumps(
         {
             "operations": [
@@ -30,16 +30,16 @@ def _response(note_ref: str) -> str:
                     "scope": "user",
                     "category": "preference",
                     "action": "create",
-                    "note_ref": note_ref,
-                    "title": "偏好",
-                    "content": note_ref,
+                    "name": name,
+                    "summary": "偏好",
+                    "content": name,
                 }
             ],
             "user_index": [
                 {
-                    "note_ref": note_ref,
+                    "name": name,
                     "category": "preference",
-                    "summary": note_ref,
+                    "summary": name,
                 }
             ],
             "project_index": [],

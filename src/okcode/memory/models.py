@@ -51,10 +51,32 @@ class MemoryPaths:
         return self.user_root if scope is MemoryScope.USER else self.project_root
 
     def index_for(self, scope: MemoryScope) -> Path:
+        return self.root_for(scope) / "MEMORY.md"
+
+    def legacy_index_for(self, scope: MemoryScope) -> Path:
+        """返回旧版索引路径，仅用于兼容读取。"""
+
         return self.root_for(scope) / "index.md"
 
-    def note_for(self, scope: MemoryScope, note_ref: str) -> Path:
-        return self.root_for(scope) / f"{note_ref}.md"
+    def note_for(self, scope: MemoryScope, name: str) -> Path:
+        validate_memory_name(name)
+        return self.root_for(scope) / f"{name}.md"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryScopeUsage:
+    """单个记忆范围的文件名和字节统计。"""
+
+    files: tuple[str, ...]
+    total_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySnapshot:
+    """项目级和用户级记忆的文件快照。"""
+
+    project: MemoryScopeUsage
+    user: MemoryScopeUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,18 +93,36 @@ class MemoryOperation:
     scope: MemoryScope
     category: MemoryCategory
     action: MemoryAction
-    note_ref: str | None = None
-    title: str = ""
+    name: str | None = None
+    summary: str = ""
     content: str = ""
+
+    @property
+    def note_ref(self) -> str | None:
+        """旧字段兼容别名。"""
+
+        return self.name
+
+    @property
+    def title(self) -> str:
+        """旧字段兼容别名。"""
+
+        return self.summary
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryIndexEntry:
     """索引中指向一条笔记的精简摘要。"""
 
-    note_ref: str
+    name: str
     category: MemoryCategory
     summary: str
+
+    @property
+    def note_ref(self) -> str:
+        """旧字段兼容别名。"""
+
+        return self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,3 +132,36 @@ class MemoryUpdate:
     operations: tuple[MemoryOperation, ...]
     user_index: tuple[MemoryIndexEntry, ...]
     project_index: tuple[MemoryIndexEntry, ...]
+
+
+_MEMORY_NAME_INVALID_CHARS = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CLOCK$",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+)
+_INDEX_RESERVED_NAMES = frozenset({"memory", "index"})
+
+
+def validate_memory_name(name: str) -> None:
+    """校验可作为 Windows Markdown 文件名的记忆名称。"""
+
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("记忆名称不能为空。")
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise ValueError("记忆名称不能包含控制字符。")
+    if any(character in _MEMORY_NAME_INVALID_CHARS for character in name):
+        raise ValueError("记忆名称包含 Windows 不允许的字符。")
+    if name[-1] in {" ", "."}:
+        raise ValueError("记忆名称不能以空格或句点结尾。")
+    stem = name.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("记忆名称不能使用 Windows 保留设备名。")
+    if name.casefold() in _INDEX_RESERVED_NAMES:
+        raise ValueError("记忆名称不能覆盖索引文件。")

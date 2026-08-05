@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+import yaml
+
 from okcode.memory.models import (
     MemoryAction,
+    MemoryCategory,
     MemoryIndexEntry,
     MemoryOperation,
     MemoryPaths,
     MemoryScope,
+    MemoryScopeUsage,
+    MemorySnapshot,
     MemoryUpdate,
+    validate_memory_name,
 )
 
-_NOTE_REF_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _READ_ENCODINGS = ("utf-8", "cp936")
 
 
@@ -59,6 +63,14 @@ class MemoryStore:
 
         return self._read_index(MemoryScope.USER), self._read_index(MemoryScope.PROJECT)
 
+    def snapshot(self) -> MemorySnapshot:
+        """返回当前两类记忆文件名及字节总量。"""
+
+        return MemorySnapshot(
+            project=self._scope_usage(MemoryScope.PROJECT),
+            user=self._scope_usage(MemoryScope.USER),
+        )
+
     def apply(self, update: MemoryUpdate) -> None:
         """校验完整更新后写入笔记和两份候选索引。"""
 
@@ -69,9 +81,9 @@ class MemoryStore:
         )
         self._validate_operations(operations)
         created = {
-            (operation.scope, operation.note_ref)
+            (operation.scope, operation.name)
             for operation in operations
-            if operation.action is MemoryAction.CREATE and operation.note_ref is not None
+            if operation.action is MemoryAction.CREATE and operation.name is not None
         }
         self._validate_index(MemoryScope.USER, update.user_index, created)
         self._validate_index(MemoryScope.PROJECT, update.project_index, created)
@@ -79,12 +91,12 @@ class MemoryStore:
             return
 
         for operation in operations:
-            assert operation.note_ref is not None
-            path = self.paths.note_for(operation.scope, operation.note_ref)
+            assert operation.name is not None
+            path = self.paths.note_for(operation.scope, operation.name)
             if operation.action is MemoryAction.CREATE:
                 self._write_note(path, operation)
             else:
-                self._append_note(path, operation.content)
+                self._append_note(path, operation)
         self._write_index(MemoryScope.USER, update.user_index)
         self._write_index(MemoryScope.PROJECT, update.project_index)
 
@@ -93,18 +105,19 @@ class MemoryStore:
         for operation in operations:
             if operation.action not in {MemoryAction.CREATE, MemoryAction.APPEND}:
                 raise ValueError("记忆操作无效。")
-            if operation.note_ref is None or not _NOTE_REF_PATTERN.fullmatch(operation.note_ref):
-                raise ValueError("记忆笔记标识无效。")
+            if operation.name is None:
+                raise ValueError("记忆名称不能为空。")
+            validate_memory_name(operation.name)
             if not operation.content.strip():
                 raise ValueError("记忆笔记内容不能为空。")
-            key = (operation.scope, operation.note_ref)
+            key = (operation.scope, operation.name)
             if key in seen:
                 raise ValueError("同一批记忆更新不能重复操作同一笔记。")
             seen.add(key)
-            path = self.paths.note_for(operation.scope, operation.note_ref)
+            path = self.paths.note_for(operation.scope, operation.name)
             if operation.action is MemoryAction.CREATE:
-                if not operation.title.strip():
-                    raise ValueError("新建记忆笔记必须包含标题。")
+                if not operation.summary.strip():
+                    raise ValueError("新建记忆笔记必须包含摘要。")
                 if path.exists():
                     raise ValueError("新建记忆笔记已存在。")
             elif not path.is_file():
@@ -118,55 +131,96 @@ class MemoryStore:
     ) -> None:
         seen: set[str] = set()
         for entry in entries:
-            if not _NOTE_REF_PATTERN.fullmatch(entry.note_ref):
-                raise ValueError("记忆索引笔记标识无效。")
-            if entry.note_ref in seen:
+            validate_memory_name(entry.name)
+            if entry.name in seen:
                 raise ValueError("记忆索引不能重复引用同一笔记。")
             if not entry.summary.strip():
                 raise ValueError("记忆索引摘要不能为空。")
-            seen.add(entry.note_ref)
-            if (scope, entry.note_ref) not in created and not self.paths.note_for(
-                scope, entry.note_ref
+            seen.add(entry.name)
+            if (scope, entry.name) not in created and not self.paths.note_for(
+                scope, entry.name
             ).is_file():
                 raise ValueError("记忆索引引用了不存在的笔记。")
         self._check_index_limit(_render_index(entries))
 
     def _write_note(self, path: Path, operation: MemoryOperation) -> None:
+        assert operation.name is not None
         timestamp = _as_utc(self._clock()).isoformat()
-        frontmatter = "\n".join(
-            (
-                "---",
-                f"id: {operation.note_ref}",
-                f"scope: {operation.scope.value}",
-                f"category: {operation.category.value}",
-                f"created_at: {timestamp}",
-                f"updated_at: {timestamp}",
-                f"title: {json.dumps(operation.title, ensure_ascii=False)}",
-                "---",
-            )
+        frontmatter = _render_frontmatter(
+            name=operation.name,
+            scope=operation.scope.value,
+            category=operation.category.value,
+            summary=operation.summary,
+            created_at=timestamp,
+            updated_at=timestamp,
         )
         _atomic_write(path, frontmatter + "\n\n" + operation.content.strip() + "\n")
 
-    def _append_note(self, path: Path, content: str) -> None:
+    def _append_note(self, path: Path, operation: MemoryOperation) -> None:
         existing = _read_text(path, "记忆笔记")
+        metadata, note_body = _parse_note(existing, path)
         timestamp = _as_utc(self._clock()).isoformat()
-        updated = _replace_updated_at(existing, timestamp)
-        body = content.strip()
-        _atomic_write(path, updated.rstrip() + f"\n\n## 更新 {timestamp}\n\n{body}\n")
+        assert operation.name is not None
+        stored_name = _metadata_string(metadata, "name") or _metadata_string(metadata, "id")
+        if stored_name and stored_name != operation.name:
+            raise ValueError("记忆文件 frontmatter 的 name 与文件名不一致。")
+        category = _metadata_string(metadata, "category") or operation.category.value
+        try:
+            MemoryScope(metadata.get("scope", operation.scope.value))
+            MemoryCategory(category)
+        except ValueError as exc:
+            raise ValueError("记忆笔记 frontmatter 的范围或分类无效。") from exc
+        summary = (
+            operation.summary.strip()
+            or _metadata_string(metadata, "summary")
+            or _metadata_string(metadata, "title")
+        )
+        if not summary:
+            raise ValueError("记忆笔记 frontmatter 缺少摘要。")
+        created_at = _metadata_string(metadata, "created_at") or timestamp
+        frontmatter = _render_frontmatter(
+            name=operation.name,
+            scope=operation.scope.value,
+            category=category,
+            summary=summary,
+            created_at=created_at,
+            updated_at=timestamp,
+        )
+        body = note_body.strip()
+        updated_body = f"{body}\n\n" if body else ""
+        updated_body += f"## 更新 {timestamp}\n\n{operation.content.strip()}\n"
+        _atomic_write(path, frontmatter + "\n\n" + updated_body)
 
     def _write_index(self, scope: MemoryScope, entries: tuple[MemoryIndexEntry, ...]) -> None:
         path = self.paths.index_for(scope)
         _atomic_write(path, _render_index(entries))
 
     def _read_index(self, scope: MemoryScope) -> str:
-        path = self.paths.index_for(scope)
-        try:
-            return _read_text(path, "记忆索引").strip()
-        except FileNotFoundError:
-            return ""
+        for path in (self.paths.index_for(scope), self.paths.legacy_index_for(scope)):
+            try:
+                return _read_text(path, "记忆索引").strip()
+            except FileNotFoundError:
+                continue
+        return ""
+
+    def _scope_usage(self, scope: MemoryScope) -> MemoryScopeUsage:
+        root = self.paths.root_for(scope)
+        if not root.is_dir():
+            return MemoryScopeUsage((), 0)
+        files: list[str] = []
+        total_bytes = 0
+        for path in root.glob("*.md"):
+            try:
+                if not path.is_file():
+                    continue
+                total_bytes += path.stat().st_size
+            except OSError:
+                continue
+            files.append(path.name)
+        return MemoryScopeUsage(tuple(sorted(files)), total_bytes)
 
     def _check_index_limit(self, content: str) -> None:
-        lines = content.count("\n") + 1 if content else 0
+        lines = len(content.splitlines())
         if lines > self.max_index_lines:
             raise ValueError("记忆索引超过最大行数。")
         if len(content.encode("utf-8")) > self.max_index_bytes:
@@ -174,21 +228,73 @@ class MemoryStore:
 
 
 def _render_index(entries: Iterable[MemoryIndexEntry]) -> str:
-    rows = ["# 长期记忆索引"]
-    rows.extend(
-        "- "
-        f"[{entry.note_ref}]({entry.note_ref}.md) | {entry.category.value} | "
-        f"{entry.summary.strip()}"
-        for entry in entries
+    rows = []
+    for entry in entries:
+        name = _escape_link_text(entry.name)
+        target = _escape_link_target(f"{entry.name}.md")
+        rows.append(f"[{name}.md]({target}) | {_single_line(entry.summary)}")
+    return "\n".join(rows) + ("\n" if rows else "")
+
+
+def _render_frontmatter(
+    *,
+    name: str,
+    scope: str,
+    category: str,
+    summary: str,
+    created_at: str,
+    updated_at: str,
+) -> str:
+    return "\n".join(
+        (
+            "---",
+            f"name: {json.dumps(name, ensure_ascii=False)}",
+            f"scope: {scope}",
+            f"category: {category}",
+            f"summary: {json.dumps(summary.strip(), ensure_ascii=False)}",
+            f"created_at: {json.dumps(created_at, ensure_ascii=False)}",
+            f"updated_at: {json.dumps(updated_at, ensure_ascii=False)}",
+            "---",
+        )
     )
-    return "\n".join(rows) + "\n"
 
 
-def _replace_updated_at(content: str, timestamp: str) -> str:
-    pattern = re.compile(r"^updated_at: .*?$", re.MULTILINE)
-    if not pattern.search(content):
-        raise ValueError("记忆笔记缺少 updated_at frontmatter。")
-    return pattern.sub(f"updated_at: {timestamp}", content, count=1)
+def _parse_note(content: str, path: Path) -> tuple[dict[str, object], str]:
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(f"记忆笔记缺少 YAML frontmatter：{path}")
+    end = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    if end is None:
+        raise ValueError(f"记忆笔记缺少 YAML frontmatter 结束标记：{path}")
+    try:
+        raw = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"记忆笔记 frontmatter YAML 无效：{path}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"记忆笔记 frontmatter 必须是对象：{path}")
+    return raw, "\n".join(lines[end + 1 :])
+
+
+def _metadata_string(metadata: dict[str, object], key: str) -> str:
+    value = metadata.get(key)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _escape_link_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _escape_link_target(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(")", "\\)")
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _read_text(path: Path, description: str) -> str:

@@ -25,12 +25,14 @@ _MEMORY_SYSTEM_PROMPT = """你是 OkCode 的内部长期记忆整理器。
 - reference：未来可复用的参考资料。
 
 请由你判断内容是否重复：没有值得保存的内容时使用 action 为 noop。已有笔记需要补充时使用 append，
-新事实使用 create。不得臆造未在输入中出现的事实。
+新事实使用 create。name 会直接成为 Markdown 文件名，可包含中文和空格，但不能包含路径分隔符、Windows
+禁止字符、控制字符、结尾空格或句点、保留设备名以及 MEMORY/index 索引保留名。
+不得臆造未在输入中出现的事实。
 
 最终只能输出一个 JSON 对象，不能使用 Markdown 代码块或输出其他文本。
 对象必须且只能包含 operations、user_index、project_index 三个字段。
-operations 的每项只能包含 scope、category、action、note_ref、title、content；
-user_index 和 project_index 的每项只能包含 note_ref、category、summary。
+operations 的每项只能包含 scope、category、action、name、summary、content；
+user_index 和 project_index 的每项只能包含 name、category、summary。
 两份索引都必须是更新后的完整索引。"""
 
 
@@ -98,7 +100,7 @@ def _transcript(messages: Sequence[ChatMessage], user_index: str, project_index:
 
 def _parse_operation(raw: object) -> MemoryOperation:
     item = _mapping(raw, "operations 项")
-    fields = {"scope", "category", "action", "note_ref", "title", "content"}
+    fields = {"scope", "category", "action", "name", "summary", "content"}
     _require_exact_fields(item, fields, "operations 项")
     try:
         scope = MemoryScope(_string(item["scope"], "operations.scope"))
@@ -106,28 +108,28 @@ def _parse_operation(raw: object) -> MemoryOperation:
         action = MemoryAction(_string(item["action"], "operations.action"))
     except ValueError as exc:
         raise ValueError("operations 包含无效的范围、分类或操作。") from exc
-    note_ref = item["note_ref"]
-    if note_ref is not None and not isinstance(note_ref, str):
-        raise ValueError("operations.note_ref 必须是字符串或 null。")
+    name = item["name"]
+    if name is not None and not isinstance(name, str):
+        raise ValueError("operations.name 必须是字符串或 null。")
     return MemoryOperation(
         scope=scope,
         category=category,
         action=action,
-        note_ref=note_ref,
-        title=_string(item["title"], "operations.title"),
+        name=name,
+        summary=_string(item["summary"], "operations.summary"),
         content=_string(item["content"], "operations.content"),
     )
 
 
 def _parse_index_entry(raw: object) -> MemoryIndexEntry:
     item = _mapping(raw, "索引项")
-    _require_exact_fields(item, {"note_ref", "category", "summary"}, "索引项")
+    _require_exact_fields(item, {"name", "category", "summary"}, "索引项")
     try:
         category = MemoryCategory(_string(item["category"], "索引项.category"))
     except ValueError as exc:
         raise ValueError("索引项.category 无效。") from exc
     return MemoryIndexEntry(
-        note_ref=_string(item["note_ref"], "索引项.note_ref"),
+        name=_string(item["name"], "索引项.name"),
         category=category,
         summary=_string(item["summary"], "索引项.summary"),
     )

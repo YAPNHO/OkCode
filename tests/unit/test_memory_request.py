@@ -17,14 +17,14 @@ def _response() -> str:
                     "scope": "user",
                     "category": "preference",
                     "action": "create",
-                    "note_ref": "concise-style",
-                    "title": "回答风格",
+                    "name": "concise-style",
+                    "summary": "回答风格",
                     "content": "用户偏好简洁回答。",
                 }
             ],
             "user_index": [
                 {
-                    "note_ref": "concise-style",
+                    "name": "concise-style",
                     "category": "preference",
                     "summary": "偏好简洁回答",
                 }
@@ -56,12 +56,12 @@ def test_parse_returns_structured_update() -> None:
     assert update.operations[0].scope is MemoryScope.USER
     assert update.operations[0].category is MemoryCategory.PREFERENCE
     assert update.operations[0].action is MemoryAction.CREATE
-    assert update.user_index[0].note_ref == "concise-style"
+    assert update.user_index[0].name == "concise-style"
 
 
 def test_parse_accepts_noop_without_duplicate_note() -> None:
     raw = json.loads(_response())
-    raw["operations"][0].update({"action": "noop", "note_ref": None, "title": "", "content": ""})
+    raw["operations"][0].update({"action": "noop", "name": None, "summary": "", "content": ""})
 
     update = MemoryRequestFactory().parse(json.dumps(raw, ensure_ascii=False))
 

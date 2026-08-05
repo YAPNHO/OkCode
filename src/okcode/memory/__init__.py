@@ -8,7 +8,10 @@ from okcode.memory.models import (
     MemoryOperation,
     MemoryPaths,
     MemoryScope,
+    MemoryScopeUsage,
+    MemorySnapshot,
     MemoryUpdate,
+    validate_memory_name,
 )
 from okcode.memory.store import MemoryStore
 
@@ -19,7 +22,10 @@ __all__ = [
     "MemoryJob",
     "MemoryOperation",
     "MemoryPaths",
+    "MemoryScopeUsage",
+    "MemorySnapshot",
     "MemoryScope",
     "MemoryStore",
     "MemoryUpdate",
+    "validate_memory_name",
 ]

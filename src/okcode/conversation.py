@@ -245,9 +245,12 @@ class ConversationSession:
     def memory_snapshot(self) -> CommandMemorySnapshot:
         if self._memory_store is None:
             return CommandMemorySnapshot((), ())
+        snapshot = self._memory_store.snapshot()
         return CommandMemorySnapshot(
-            _memory_file_names(self._memory_store.paths.project_root),
-            _memory_file_names(self._memory_store.paths.user_root),
+            snapshot.project.files,
+            snapshot.user.files,
+            snapshot.project.total_bytes,
+            snapshot.user.total_bytes,
         )
 
     def status_snapshot(self) -> CommandStatusSnapshot:
@@ -1133,12 +1136,6 @@ def _default_context_factory(
         turn_kind=turn_kind,
         iteration=iteration,
     )
-
-
-def _memory_file_names(root: Path) -> tuple[str, ...]:
-    if not root.is_dir():
-        return ()
-    return tuple(sorted(path.name for path in root.glob("*.md") if path.is_file()))
 
 
 def _task_list_entry(snapshot: object) -> AgentTaskListEntry:

@@ -282,10 +282,12 @@ class CommandStatus:
 
 @dataclass(frozen=True, slots=True)
 class CommandMemory:
-    """/memory 的记忆文件名列表。"""
+    """/memory 的记忆文件名和字节统计。"""
 
     project_memory_files: tuple[str, ...]
     user_memory_files: tuple[str, ...]
+    project_memory_bytes: int = 0
+    user_memory_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -49,6 +49,12 @@ from okcode.sessions import SessionDescriptor
 from okcode.tools.models import ToolErrorCode
 
 
+def _format_memory_size(total_bytes: int) -> str:
+    """将字节数转换为稳定的 KiB 展示文本。"""
+
+    return f"{total_bytes / 1024:.2f} KiB"
+
+
 class TerminalUI:
     """保留普通终端滚动历史的最小交互界面。"""
 
@@ -589,7 +595,15 @@ class TerminalUI:
         project = ", ".join(event.project_memory_files) or "（无）"
         user = ", ".join(event.user_memory_files) or "（无）"
         self._console.print(f"项目记忆：{project}", style="dim")
+        self._console.print(
+            f"项目记忆大小：{_format_memory_size(event.project_memory_bytes)}", style="dim"
+        )
         self._console.print(f"用户记忆：{user}", style="dim")
+        self._console.print(
+            f"用户记忆大小：{_format_memory_size(event.user_memory_bytes)}", style="dim"
+        )
+        total_bytes = event.project_memory_bytes + event.user_memory_bytes
+        self._console.print(f"记忆总大小：{_format_memory_size(total_bytes)}", style="dim")
         self._turn_open = True
 
     def _render_command_session(self, event: CommandSession) -> None:

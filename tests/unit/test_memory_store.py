@@ -12,6 +12,7 @@ from okcode.memory.models import (
     MemoryOperation,
     MemoryPaths,
     MemoryScope,
+    MemoryScopeUsage,
     MemoryUpdate,
 )
 from okcode.memory.store import MemoryStore
@@ -29,17 +30,17 @@ def _store(tmp_path: Path, **kwargs: object) -> MemoryStore:
     return MemoryStore(_paths(tmp_path), clock=_now, **kwargs)
 
 
-def _entry(note_ref: str, category: MemoryCategory, summary: str = "摘要") -> MemoryIndexEntry:
-    return MemoryIndexEntry(note_ref, category, summary)
+def _entry(name: str, category: MemoryCategory, summary: str = "摘要") -> MemoryIndexEntry:
+    return MemoryIndexEntry(name, category, summary)
 
 
 def _create(
     scope: MemoryScope,
     category: MemoryCategory,
-    note_ref: str,
+    name: str,
     content: str = "笔记正文",
 ) -> MemoryOperation:
-    return MemoryOperation(scope, category, MemoryAction.CREATE, note_ref, "测试标题", content)
+    return MemoryOperation(scope, category, MemoryAction.CREATE, name, "测试摘要", content)
 
 
 def test_memory_paths_keep_project_and_user_roots_separate(tmp_path: Path) -> None:
@@ -50,6 +51,17 @@ def test_memory_paths_keep_project_and_user_roots_separate(tmp_path: Path) -> No
         == tmp_path / "project-memory/project-note.md"
     )
     assert paths.note_for(MemoryScope.USER, "user-note") == tmp_path / "user-memory/user-note.md"
+    assert paths.index_for(MemoryScope.USER) == tmp_path / "user-memory/MEMORY.md"
+    assert paths.legacy_index_for(MemoryScope.USER) == tmp_path / "user-memory/index.md"
+
+
+def test_memory_paths_allow_unicode_and_spaces_but_reject_unsafe_names(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+
+    assert paths.note_for(MemoryScope.USER, "回答 风格") == tmp_path / "user-memory/回答 风格.md"
+    for name in ("../outside", "bad/name", "bad|name", "CON", "MEMORY", "trailing "):
+        with pytest.raises(ValueError):
+            paths.note_for(MemoryScope.USER, name)
 
 
 def test_memory_paths_for_workspace_use_project_local_okcode_directory(tmp_path: Path) -> None:
@@ -74,10 +86,12 @@ def test_apply_writes_frontmatter_notes_and_two_indexes(tmp_path: Path) -> None:
 
     user_note = _paths(tmp_path).note_for(MemoryScope.USER, "python-preference")
     project_note = _paths(tmp_path).note_for(MemoryScope.PROJECT, "architecture")
-    assert "---\nid: python-preference\nscope: user\ncategory: preference" in user_note.read_text(
-        encoding="utf-8"
-    )
+    user_content = user_note.read_text(encoding="utf-8")
+    assert 'name: "python-preference"' in user_content
+    assert 'summary: "测试摘要"' in user_content
     assert project_note.is_file()
+    index = _paths(tmp_path).index_for(MemoryScope.USER).read_text(encoding="utf-8")
+    assert index == "[python-preference.md](python-preference.md) | 偏好 Python\n"
     context = store.read_context()
     assert "用户级长期记忆" in context
     assert "项目级长期记忆" in context
@@ -105,17 +119,51 @@ def test_append_updates_existing_note_without_duplicate_file(tmp_path: Path) -> 
     store.apply(MemoryUpdate((append,), initial.user_index, ()))
 
     notes = list(_paths(tmp_path).user_root.glob("*.md"))
-    assert [path.name for path in notes if path.name != "index.md"] == ["feedback.md"]
+    assert [path.name for path in notes if path.name != "MEMORY.md"] == ["feedback.md"]
     content = _paths(tmp_path).note_for(MemoryScope.USER, "feedback").read_text(encoding="utf-8")
     assert "初始反馈" in content
     assert "补充反馈" in content
     assert "## 更新" in content
 
 
+def test_append_preserves_metadata_and_can_update_summary(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    initial = MemoryUpdate(
+        (_create(MemoryScope.USER, MemoryCategory.CORRECTION, "feedback"),),
+        (_entry("feedback", MemoryCategory.CORRECTION, "初始摘要"),),
+        (),
+    )
+    store.apply(initial)
+
+    store.apply(
+        MemoryUpdate(
+            (
+                MemoryOperation(
+                    MemoryScope.USER,
+                    MemoryCategory.CORRECTION,
+                    MemoryAction.APPEND,
+                    "feedback",
+                    "更新后的摘要",
+                    "补充内容",
+                ),
+            ),
+            (_entry("feedback", MemoryCategory.CORRECTION, "更新后的摘要"),),
+            (),
+        )
+    )
+
+    content = _paths(tmp_path).note_for(MemoryScope.USER, "feedback").read_text(encoding="utf-8")
+    assert 'name: "feedback"' in content
+    assert "category: correction" in content
+    assert 'created_at: "2026-07-30T10:00:00+00:00"' in content
+    assert 'summary: "更新后的摘要"' in content
+    assert "补充内容" in content
+
+
 def test_read_context_accepts_legacy_cp936_index(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     paths.user_root.mkdir(parents=True)
-    paths.index_for(MemoryScope.USER).write_bytes(
+    paths.legacy_index_for(MemoryScope.USER).write_bytes(
         "# 长期记忆索引\n- 用户昵称为鹏鹏\n".encode("cp936")
     )
 
@@ -123,6 +171,18 @@ def test_read_context_accepts_legacy_cp936_index(tmp_path: Path) -> None:
 
     assert "用户级长期记忆" in context
     assert "用户昵称为鹏鹏" in context
+
+
+def test_read_context_prefers_new_index_over_legacy_index(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.user_root.mkdir(parents=True)
+    paths.index_for(MemoryScope.USER).write_text("新索引\n", encoding="utf-8")
+    paths.legacy_index_for(MemoryScope.USER).write_text("旧索引\n", encoding="utf-8")
+
+    context = _store(tmp_path).read_context()
+
+    assert "新索引" in context
+    assert "旧索引" not in context
 
 
 def test_append_rewrites_legacy_cp936_note_as_utf8(tmp_path: Path) -> None:
@@ -195,12 +255,12 @@ def test_apply_rejects_invalid_note_reference(tmp_path: Path) -> None:
         (),
     )
 
-    with pytest.raises(ValueError, match="标识"):
+    with pytest.raises(ValueError, match="记忆名称"):
         store.apply(update)
 
 
 def test_apply_rejects_index_over_line_limit(tmp_path: Path) -> None:
-    store = _store(tmp_path, max_index_lines=2)
+    store = _store(tmp_path, max_index_lines=1)
     update = MemoryUpdate(
         (
             _create(MemoryScope.USER, MemoryCategory.PREFERENCE, "one"),
@@ -228,3 +288,20 @@ def test_apply_rejects_index_over_byte_limit(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="字节"):
         store.apply(update)
+
+
+def test_snapshot_counts_current_scope_markdown_files_only(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.project_root.mkdir(parents=True)
+    paths.user_root.mkdir(parents=True)
+    paths.project_root.joinpath("MEMORY.md").write_bytes(b"a" * 1025)
+    paths.project_root.joinpath("note.md").write_bytes(b"b" * 7)
+    paths.project_root.joinpath("ignored.txt").write_bytes(b"c" * 99)
+    paths.project_root.joinpath("nested").mkdir()
+    paths.project_root.joinpath("nested/nested.md").write_bytes(b"d" * 101)
+    paths.user_root.joinpath("user.md").write_bytes(b"e" * 3)
+
+    snapshot = _store(tmp_path).snapshot()
+
+    assert snapshot.project == MemoryScopeUsage(("MEMORY.md", "note.md"), 1032)
+    assert snapshot.user == MemoryScopeUsage(("user.md",), 3)

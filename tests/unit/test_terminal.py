@@ -9,11 +9,22 @@ from rich.console import Console
 
 from okcode.errors import ProviderError, ProviderErrorKind
 from okcode.mcp.models import McpDiscoveryWarning
+from okcode.memory.models import (
+    MemoryAction,
+    MemoryCategory,
+    MemoryIndexEntry,
+    MemoryOperation,
+    MemoryPaths,
+    MemoryScope,
+    MemoryUpdate,
+)
+from okcode.memory.store import MemoryStore
 from okcode.models import (
     AgentProgress,
     AgentStopped,
     AgentStopReason,
     ChatMessage,
+    CommandMemory,
     CoordinatorStatus,
     HookListEntry,
     HookListEvent,
@@ -354,6 +365,62 @@ def test_coordinator_status_renders_enabled_and_disabled_states() -> None:
     assert "未启用" in text
     assert "双锁模式生效" in text
     assert "等待环境变量" in text
+
+
+def test_memory_command_renders_files_and_kib_sizes() -> None:
+    ui, output = _ui(width=100)
+    ui.render_event(
+        CommandMemory(
+            ("项目.md",),
+            ("偏好.md",),
+            1536,
+            512,
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "项目记忆：项目.md" in text
+    assert "项目记忆大小：1.50 KiB" in text
+    assert "用户记忆：偏好.md" in text
+    assert "用户记忆大小：0.50 KiB" in text
+    assert "记忆总大小：2.00 KiB" in text
+
+
+def test_memory_write_snapshot_and_render_end_to_end(tmp_path) -> None:
+    store = MemoryStore(MemoryPaths.for_workspace(tmp_path))
+    store.apply(
+        MemoryUpdate(
+            (
+                MemoryOperation(
+                    MemoryScope.USER,
+                    MemoryCategory.PREFERENCE,
+                    MemoryAction.CREATE,
+                    "回答 风格",
+                    "偏好简洁回答",
+                    "用户偏好简洁回答。",
+                ),
+            ),
+            (MemoryIndexEntry("回答 风格", MemoryCategory.PREFERENCE, "偏好简洁回答"),),
+            (),
+        )
+    )
+    snapshot = store.snapshot()
+    ui, output = _ui(width=100)
+    ui.render_event(
+        CommandMemory(
+            snapshot.project.files,
+            snapshot.user.files,
+            snapshot.project.total_bytes,
+            snapshot.user.total_bytes,
+        )
+    )
+    ui.finish_turn()
+
+    text = _plain_text(output)
+    assert "用户记忆：MEMORY.md, 回答 风格.md" in text
+    assert "用户记忆大小：" in text
+    assert "记忆总大小：" in text
 
 
 def test_token_usage_shows_real_cache_fields_when_available() -> None:

@@ -96,7 +96,14 @@ def status_command(context: CommandContext, command: ParsedCommand) -> CommandRe
 def memory_command(context: CommandContext, command: ParsedCommand) -> CommandResult:
     snapshot = context.conversation.memory_snapshot()
     return CommandResult(
-        events=(CommandMemory(snapshot.project_memory_files, snapshot.user_memory_files),)
+        events=(
+            CommandMemory(
+                snapshot.project_memory_files,
+                snapshot.user_memory_files,
+                snapshot.project_memory_bytes,
+                snapshot.user_memory_bytes,
+            ),
+        )
     )
 
 
