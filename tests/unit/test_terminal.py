@@ -29,6 +29,8 @@ from okcode.models import (
     HookListEntry,
     HookListEvent,
     PermissionStatus,
+    ProviderConfig,
+    ProviderProtocol,
     Role,
     SessionHistoryEvent,
     SkillListEntry,
@@ -71,12 +73,39 @@ def _ui(
     width: int = 40,
 ) -> tuple[TerminalUI, StringIO]:
     output = StringIO()
-    console = Console(file=output, force_terminal=True, color_system="standard", width=width)
+    console = Console(
+        file=output,
+        force_terminal=True,
+        color_system="standard",
+        no_color=False,
+        legacy_windows=False,
+        width=width,
+    )
     return TerminalUI(console=console, session=StubSession(values or [])), output
 
 
 def _plain_text(output: StringIO) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+
+
+def test_welcome_renders_modern_okcode_banner_before_status_line() -> None:
+    ui, output = _ui(width=120)
+    ui.show_welcome(
+        ProviderConfig(
+            name="test",
+            protocol=ProviderProtocol.OPENAI,
+            model="test-model",
+            base_url="https://example.test",
+            api_key="secret",
+        )
+    )
+
+    text = _plain_text(output)
+    assert "██████╗ ██╗  ██╗ ██████╗" in text
+    assert "╚██████╔╝██║  ██╗╚██████╗" in text
+    assert "OkCode | test | openai | test-model | 权限：default" in text
+    assert text.index("██████╗") < text.index("OkCode | test")
+    assert re.search(r"\x1b\[(?:1;)?36m", output.getvalue())
 
 
 def test_thinking_is_bracketed_green_and_answer_is_separated() -> None:

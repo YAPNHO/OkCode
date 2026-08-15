@@ -48,6 +48,14 @@ from okcode.permissions.models import PermissionConfirmation, PermissionRequest
 from okcode.sessions import SessionDescriptor
 from okcode.tools.models import ToolErrorCode
 
+_STARTUP_BANNER = """\
+ ██████╗ ██╗  ██╗ ██████╗ ██████╗ ██████╗ ███████╗
+██╔═══██╗██║ ██╔╝██╔════╝██╔═══██╗██╔═══██╗██╔════╝
+██║   ██║█████╔╝ ██║     ██║   ██║██║   ██║█████╗
+██║   ██║██╔═██╗ ██║     ██║   ██║██║   ██║██╔══╝
+╚██████╔╝██║  ██╗╚██████╗╚██████╔╝╚██████╔╝███████╗
+ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝"""
+
 
 def _format_memory_size(total_bytes: int) -> str:
     """将字节数转换为稳定的 KiB 展示文本。"""
@@ -86,6 +94,12 @@ class TerminalUI:
 
     def show_welcome(self, config: ProviderConfig, permission_mode: str = "default") -> None:
         self._permission_mode = permission_mode
+        self._console.print(
+            _STARTUP_BANNER,
+            style="bold cyan",
+            markup=False,
+            highlight=False,
+        )
         self._console.print(
             f"OkCode | {config.name} | {config.protocol} | {config.model} | 权限：{permission_mode}"
         )
